@@ -1,0 +1,1 @@
+import{n as e,t}from"./global-settings-manager-COxAt1J9.js";e();export{t as initSettingsManager};

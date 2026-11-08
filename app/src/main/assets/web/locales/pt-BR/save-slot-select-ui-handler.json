@@ -1,7 +1,1 @@
-{
-  "overwriteData": "Substituir os dados desse slot?",
-  "loading": "Carregando...",
-  "wave": "Onda",
-  "lv": "Nv",
-  "empty": "Vazio"
-}
+{"overwriteData":"Substituir os dados desse slot?","loading":"Carregando…","wave":"Onda","lv":"Nv","empty":"Vazio","renameRun":"Renomear Run","deleteRun":"Excluir Run","deleteData":"Excluir os dados no slot selecionado?"}

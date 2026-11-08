@@ -1,8 +1,1 @@
-{
-  "pp": "PP",
-  "power": "Potencia",
-  "accuracy": "Precisión",
-  "abilityFlyInText": " {{passive}}{{pokemonName}}\n{{abilityName}}",
-  "passive": "Pasiva de ",
-  "teraHover": "Tera-tipo {{type}}"
-}
+{"pp":"PP","power":"Potencia","accuracy":"Precisión","abilityFlyInText":" {{passive}}{{pokemonName}}\n{{abilityName}}","passive":"Pasiva de ","teraHover":"Tera-tipo {{type}}","effectiveness000":"×0","effectiveness100":"×1","effectivenessMultiplier":"×{{effectiveness}}"}

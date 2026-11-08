@@ -1,7 +1,1 @@
-{
-  "fight": "Savaş",
-  "ball": "Top",
-  "pokemon": "Pokémon",
-  "run": "Kaç",
-  "actionMessage": "{{pokemonName}}\nne yapacak?"
-}
+{"fight":"Saldır","ball":"Top","pokemon":"Pokémon","run":"Kaç","actionMessage":"{{pokemonName}}\nne yapsın?","ballCancel":"İptal"}

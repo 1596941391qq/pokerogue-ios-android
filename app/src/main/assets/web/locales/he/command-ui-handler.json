@@ -1,7 +1,1 @@
-{
-  "fight": "תקיפה",
-  "ball": "כדור",
-  "pokemon": "פוקימונים",
-  "run": "נסיגה",
-  "actionMessage": "מה {{pokemonName}} יעשה?"
-}
+{"fight":"תקיפה","ball":"כדור","pokemon":"פוקימונים","run":"נסיגה","actionMessage":"מה {{pokemonName}} יעשה?"}

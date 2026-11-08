@@ -1,8 +1,1 @@
-{
-  "pp": "PP",
-  "power": "Power",
-  "accuracy": "Accuracy",
-  "abilityFlyInText": " {{pokemonName}}’s\n{{passive}}{{abilityName}}",
-  "passive": "Passive ",
-  "teraHover": "{{type}} Terastallized"
-}
+{"pp":"PP","power":"Power","accuracy":"Accuracy","abilityFlyInText":" {{pokemonName}}’s\n{{passive}}{{abilityName}}","passive":"Passive ","teraHover":"{{type}} Terastallized","effectiveness000":"0×","effectiveness100":"1×","effectivenessMultiplier":"{{effectiveness}}×"}

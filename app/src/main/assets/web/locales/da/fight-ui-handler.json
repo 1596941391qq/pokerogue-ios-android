@@ -1,6 +1,1 @@
-{
-  "pp": "KP",
-  "power": "Stryke",
-  "accuracy": "Præcision",
-  "abilityFlyInText": " {{pokemonName}}s\n{{passive}}{{abilityName}}"
-}
+{"pp":"KP","power":"Stryke","accuracy":"Præcision","abilityFlyInText":" {{pokemonName}}s\n{{passive}}{{abilityName}}","passive":"Passiv ","teraHover":"{{type}} Terastalliserede"}

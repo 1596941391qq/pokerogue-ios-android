@@ -1,7 +1,1 @@
-{
-  "overwriteData": "選択した　スロットに　データを　上書きします？",
-  "loading": "読込中…",
-  "wave": "ラウンド",
-  "lv": "Lv",
-  "empty": "なし"
-}
+{"overwriteData":"選択した　スロットに　データを　上書きします？","loading":"読込中…","wave":"ラウンド","lv":"Lv","empty":"なし","renameRun":"ラン名を変える","deleteRun":"ランを削除","deleteData":"選んだスロットのデータを削除する？"}

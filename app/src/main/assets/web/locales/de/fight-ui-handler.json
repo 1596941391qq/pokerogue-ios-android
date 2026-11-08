@@ -1,8 +1,1 @@
-{
-  "pp": "AP",
-  "power": "Stärke",
-  "accuracy": "Genauigkeit",
-  "abilityFlyInText": "{{passive}}{{abilityName}} von {{pokemonName}} wirkt!",
-  "passive": "Passive Fähigkeit ",
-  "teraHover": "Tera-Typ {{type}}"
-}
+{"pp":"AP","power":"Stärke","accuracy":"Genauigkeit","abilityFlyInText":"{{passive}}{{abilityName}} von {{pokemonName}} wirkt!","passive":"Passive Fähigkeit ","teraHover":"Tera-Typ {{type}}","effectiveness000":"0x","effectiveness100":"1x","effectivenessMultiplier":"{{effectiveness}}x"}

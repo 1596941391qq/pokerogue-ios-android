@@ -1,6 +1,1 @@
-{
-  "fight": "Kæmp",
-  "ball": "Ball",
-  "pokemon": "Pokémon",
-  "run": "Flygt"
-}
+{"fight":"Kæmp","ball":"Ball","pokemon":"Pokémon","run":"Flygt","actionMessage":"Hvad vil\n{{pokemonName}} gøre?","ballCancel":"Annuller"}
