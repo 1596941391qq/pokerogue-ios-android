@@ -8,12 +8,12 @@
 
 #### apk 直接安装可玩
 
-在 [Release](https://github.com/1596941391qq/pokerogue-android/releases) 里下载新打包的 `.apk`，安装即玩，无需登录。
+在 [Release](https://github.com/1596941391qq/pokerogue-ios-android/releases) 里下载新打包的 `.apk`，安装即玩，无需登录。
 兼容性说明：安卓 11 及以上或 7 及以下可玩，其他版本请看下方群友反馈。
 
 #### iOS 安装
 
-在 [Release](https://github.com/1596941391qq/pokerogue-android/releases) 里下载 `.ipa`（未签名，需要自签），任选一种方式装：
+在 [Release](https://github.com/1596941391qq/pokerogue-ios-android/releases) 里下载 `.ipa`（未签名，需要自签），任选一种方式装：
 
 | 方式 | 适合谁 | 说明 |
 | --- | --- | --- |
@@ -59,7 +59,7 @@
 
 ### English
 
-**Android (APK):** download the `.apk` from the [Releases](https://github.com/1596941391qq/pokerogue-android/releases) page and install it. No login needed; play offline. Playable on Android 11 and above or 7 and below; for other versions see the feedback from players above. Every release is signed with the same key, so installing over an older version keeps your save.
+**Android (APK):** download the `.apk` from the [Releases](https://github.com/1596941391qq/pokerogue-ios-android/releases) page and install it. No login needed; play offline. Playable on Android 11 and above or 7 and below; for other versions see the feedback from players above. Every release is signed with the same key, so installing over an older version keeps your save.
 
 **iOS (IPA):** download the unsigned `.ipa` from the same page and install it with one of these:
 - **TrollStore**: open the IPA in TrollStore. It stays installed permanently.
@@ -80,8 +80,8 @@ With a free Apple ID, trust your profile under Settings → General → VPN & De
 
 - 游戏本体是 **PokéRogue**，作者 Pagefault Games 及贡献者，按 **GNU AGPL-3.0** 开源：https://github.com/pagefaultgames/pokerogue 。本仓库把它的离线版本打包成安卓 / iOS App，`pkmain/pokerogue` 子模块就是所用的官方源码版本，许可证全文见 [LICENSE](LICENSE)。
   The game is **PokéRogue** by Pagefault Games and contributors, licensed under the **GNU AGPL-3.0**: https://github.com/pagefaultgames/pokerogue. This repository packages its offline build as Android and iOS apps. The `pkmain/pokerogue` submodule pins the exact upstream source that was built. The full license text is in [LICENSE](LICENSE).
-- 打包源码（安卓壳、iOS 壳、同步脚本）就在本仓库：https://github.com/1596941391qq/pokerogue-android
-  The packaging source (Android shell, iOS shell, sync script) is this repository: https://github.com/1596941391qq/pokerogue-android
+- 打包源码（安卓壳、iOS 壳、同步脚本）就在本仓库：https://github.com/1596941391qq/pokerogue-ios-android
+  The packaging source (Android shell, iOS shell, sync script) is this repository: https://github.com/1596941391qq/pokerogue-ios-android
 - 本项目是粉丝作品，与任天堂、Game Freak、The Pokémon Company 无关。Pokémon 及相关名称是其各自权利人的商标。
   This is an unofficial fan project, not affiliated with Nintendo, Game Freak, or The Pokémon Company. Pokémon and related names are trademarks of their respective owners.
 
