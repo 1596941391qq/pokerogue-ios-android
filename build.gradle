@@ -2,27 +2,23 @@
 
 buildscript {
     repositories {
-        // 其他仓库...
-        maven { url = uri('https://maven.aliyun.com/repository/google') }
-        maven { url = uri('https://maven.aliyun.com/repository/jcenter') }
-        maven { url = uri('https://maven.aliyun.com/repository/public' )}
-        maven {url = uri('https://dl.bintray.com/jetbrains/anko')}
         google()
+        mavenCentral()
+        // 国内镜像兜底 / mirrors for mainland China
+        maven { url = uri('https://maven.aliyun.com/repository/google') }
+        maven { url = uri('https://maven.aliyun.com/repository/public') }
     }
     dependencies {
-        // 其他插件...
-
         classpath 'com.android.tools.build:gradle:8.2.0' // 请使用适合你项目的版本
     }
 }
 allprojects {
     repositories {
-        maven { url = uri('https://maven.aliyun.com/repository/google') }
-        maven { url = uri('https://maven.aliyun.com/repository/jcenter') }
-        maven { url = uri('https://maven.aliyun.com/repository/public') }
-        maven {url = uri('https://dl.bintray.com/jetbrains/anko')}
         google()
-
+        mavenCentral()
+        // 国内镜像兜底 / mirrors for mainland China
+        maven { url = uri('https://maven.aliyun.com/repository/google') }
+        maven { url = uri('https://maven.aliyun.com/repository/public') }
     }
 }
 tasks.register("clean", Delete) {
