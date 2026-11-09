@@ -6,6 +6,8 @@
 
 [中文](#apk直接安装可玩) · [iOS 安装](#ios-安装) · [English](#english) · [源码与许可证](#源码与许可证--source--license)
 
+电脑版（Windows / Mac）在另一个仓库：[pokerogue-desktop](https://github.com/1596941391qq/pokerogue-desktop/releases)。PC version (Windows / Mac): [pokerogue-desktop](https://github.com/1596941391qq/pokerogue-desktop/releases).
+
 #### apk 直接安装可玩
 
 在 [Release](https://github.com/1596941391qq/pokerogue-ios-android/releases) 里下载新打包的 `.apk`，安装即玩，无需登录。
