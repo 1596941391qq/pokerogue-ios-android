@@ -13,7 +13,7 @@
 //   A special reward (a set list: fixed battles, mystery encounters) is one pick, by the same alternation.
 // - Held-item transfer, discard, fusion, reordering and releasing (on the reward screen's party menu) only
 //   touch the picker's own Pokémon; after a catch with a full party only the catcher's own can be released.
-// - 二打一: a single boss facing both players (a double battle with one enemy in all) gets double HP, once.
+// - Two players: every enemy Pokémon has double max HP (wild, trainers, bosses), on top of the double battles.
 window.CoopTeam = (function () {
   const log = (...a) => console.log('COOP', ...a.map(x => typeof x === 'string' ? x : JSON.stringify(x)));
   const KEY = 'coop-owners-v1';
@@ -347,55 +347,43 @@ window.CoopTeam = (function () {
     log('rewards: 5 选 2 on');
   }
 
-  // ---- 二打一: one boss against both players has double HP ----
-  // Only when the enemy side is a single boss in a double battle (in this build every wave is a double
-  // battle, so the every-10-waves bosses come as two with the game's own split health bars: not touched;
-  // a lone boss happens in mystery-encounter and one-Pokémon boss trainer battles). Applied once per boss:
-  // what was done is remembered by boss id + wave, so continuing a save does not double again.
-  const BOSS_KEY = 'coop-boss-x2-v1';
-  let bossDone = {};
-  try { bossDone = JSON.parse(localStorage.getItem(BOSS_KEY) || '{}') || {}; } catch {}
-  function keepDouble(e) { // the game recalculates stats (form change...): keep the doubling through it
-    if (e.__coopX2) return;
+  // ---- two players: every enemy has double HP ----
+  // hacking 11-12: with two players the enemies are twice as tough as in single player, on top of the double
+  // battles. Every enemy Pokémon of the battle (wild, trainer's whole party, bosses, mystery encounters) gets
+  // twice the max HP the game would give it; nothing else (level, other stats, rewards) changes.
+  // Nothing is remembered between sessions: the normal max HP is recomputed with the game's own
+  // calculateStats, so an enemy rebuilt from a save is set to exactly double again, never four times.
+  function doubleHp(e) {
+    if (e.__coopX2 || !e.stats || typeof e.calculateStats !== 'function') return;
+    const calc = e.calculateStats, hp0 = e.hp, max0 = e.stats[0];
+    calc.call(e); // the game's own numbers (also undoes a doubled value that came back from a save)
+    const base = e.stats[0];
+    if (!(base > 1)) { e.__coopX2 = true; return; } // 1 HP by design (Shedinja): left alone
+    const share = max0 > 0 ? Math.min(1, hp0 / max0) : 1; // how full it was before
+    e.stats[0] = base * 2;
+    e.hp = hp0 > 0 ? Math.max(1, Math.round(share * base * 2)) : 0;
     e.__coopX2 = true;
-    const calc = e.calculateStats;
-    e.calculateStats = function () {
-      const hp0 = this.hp, max0 = this.stats ? this.stats[0] : 0;
+    e.calculateStats = function () { // the game recalculates stats (form change, level...): keep the doubling
+      const hp1 = this.hp, max1 = this.stats ? this.stats[0] : 0;
       const r = calc.apply(this, arguments);
       const max = this.stats[0] * 2;
       this.stats[0] = max;
-      if (hp0 > 0) this.hp = Math.min(max, hp0 + Math.max(0, max - max0));
+      if (hp1 > 0) this.hp = Math.min(max, hp1 + Math.max(0, max - max1));
       return r;
     };
+    try { if (e.battleInfo) e.updateInfo(true); } catch {}
+    return base;
   }
-  function bossRule() {
+  function enemyRule() {
     const s = scene(), b = s.currentBattle;
-    if (!b || !b.double || !b.enemyParty || b.enemyParty.length !== 1) return;
-    const e = b.enemyParty[0];
-    if (!e || e.__coopX2 || !e.stats || !e.isBoss || !e.isBoss()) return;
-    const rec = bossDone[e.id];
-    if (rec && rec.wave === b.waveIndex) { // a continued save: already doubled once
-      if (e.stats[0] < rec.max) { // saved before the doubling (or recalculated on load): put it back, same share of HP
-        e.hp = Math.min(rec.max, Math.round(e.hp * rec.max / e.stats[0]));
-        e.stats[0] = rec.max;
-      }
-      keepDouble(e);
-      try { e.updateInfo(true); } catch {}
-      log('boss x2 kept (continued save): ' + e.name + ' wave ' + b.waveIndex + ' HP ' + e.hp + '/' + e.stats[0]);
-      return;
+    if (!b || !b.enemyParty) return;
+    const done = [];
+    for (const e of b.enemyParty) {
+      if (!e || e.__coopX2) continue;
+      const base = doubleHp(e);
+      if (base) done.push(e.name + ' ' + base + '->' + e.stats[0] + (e.isBoss && e.isBoss() ? ' (boss)' : ''));
     }
-    // both players in the fight: the two leading Pokémon are one each
-    const lead = party().slice(0, 2).filter(p => !p.isFainted()).map(ownerOf);
-    if (!(lead.includes('p1') && lead.includes('p2'))) return;
-    if (e.hp < e.stats[0]) return; // already hurt (a player came back mid-fight, an old save): leave it
-    const base = e.stats[0], max = base * 2;
-    e.stats[0] = max;
-    e.hp = Math.min(max, e.hp * 2);
-    keepDouble(e);
-    bossDone = { [e.id]: { wave: b.waveIndex, max } }; // one boss at a time: older records are not needed
-    try { localStorage.setItem(BOSS_KEY, JSON.stringify(bossDone)); } catch {}
-    try { e.updateInfo(true); } catch {}
-    log('boss x2 ' + e.name + ' wave ' + b.waveIndex + ': HP ' + base + ' -> ' + max);
+    if (done.length) { log('enemy HP x2 wave ' + b.waveIndex + ': ' + done.join(', ')); }
   }
 
   // ---- one shared question: who answers ----
@@ -420,7 +408,7 @@ window.CoopTeam = (function () {
   setInterval(() => {
     const s = scene();
     if (!s || !s.phaseManager) return;
-    try { hookPhases(s); hookParty(s); hookStarters(s); watchBalls(); assign(); bossRule(); } catch (e) { log('team error', String(e)); }
+    try { hookPhases(s); hookParty(s); hookStarters(s); watchBalls(); assign(); enemyRule(); } catch (e) { log('team error', String(e)); }
   }, 150);
 
   // the reward round on screen now: {round, picker} or null; a special one-pick reward has single: true
