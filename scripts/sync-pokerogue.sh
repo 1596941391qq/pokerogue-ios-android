@@ -42,4 +42,7 @@ rsync -a --delete --exclude .gitkeep dist/ "$WEB/"
 VERSION="$(node -p "require('./package.json').version")"
 COMMIT="$(git rev-parse HEAD)"
 printf '{"pokerogueVersion":"%s","pokerogueCommit":"%s"}\n' "$VERSION" "$COMMIT" > "$ROOT/pokerogue-version.json"
+# this project's additions: co-op hooks and panel, old-browser notice (see scripts/patch-web.mjs)
+node "$ROOT/scripts/patch-web.mjs" "$WEB"
+
 echo "Synced PokeRogue $VERSION ($COMMIT) into $WEB"

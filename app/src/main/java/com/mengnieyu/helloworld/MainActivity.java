@@ -53,6 +53,9 @@ public class MainActivity extends AppCompatActivity {
     private final int FILECHOOSER_RESULTCODE=1;
 
     private WebView webView;
+    private static final String GAME_HOST = "localhost";
+    private static final int GAME_PORT = 6868;
+    private static CanvasGameServer server;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -64,8 +67,6 @@ public class MainActivity extends AppCompatActivity {
         requestmanageexternalstorage_Permission();
         //隐藏导航
         hideUIoption();
-        //锁屏幕
-        lockPositive();
 
         EdgeToEdge.enable(this);
         setContentView(R.layout.activity_main);
@@ -136,31 +137,64 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebViewClient(new WebViewClient(){
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-
-
-                return super.shouldOverrideUrlLoading(view, request);
+                // Anything that is not the game itself (wiki, Discord, the co-op join page) opens in the
+                // system browser instead of replacing the game.
+                Uri u = request.getUrl();
+                String scheme = u.getScheme() == null ? "" : u.getScheme();
+                if (GAME_HOST.equals(u.getHost()) || scheme.equals("blob") || scheme.equals("data") || scheme.equals("about")) {
+                    return false;
+                }
+                if (scheme.equals("http") || scheme.equals("https")) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, u));
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "没有找到可以打开链接的浏览器", Toast.LENGTH_LONG).show();
+                    }
+                }
+                return true;
             }
-
-
-
 
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                // 返回null，让WebView自己处理请求
-
-                return null;
-
+                // Serve the game's files straight from the APK. The local HTTP server (CanvasGameServer) stays
+                // for what is not handled here (video, range requests): loading the ~1000 start-up files through
+                // it failed now and then on slower phones, which showed as missing pictures in the game.
+                Uri u = request.getUrl();
+                if (!"GET".equals(request.getMethod()) || !GAME_HOST.equals(u.getHost()) || u.getPort() != GAME_PORT) {
+                    return null;
+                }
+                String path = u.getPath(); // already decoded ("Comet Punch.mp3")
+                if (path == null || path.isEmpty() || path.endsWith("/")) {
+                    path = (path == null ? "/" : path) + "index.html";
+                }
+                path = path.replaceAll("/{2,}", "/"); // the game asks for "images//logo.png"
+                String lower = path.toLowerCase();
+                if (lower.endsWith(".mp4") || lower.endsWith(".webm") || request.getRequestHeaders().containsKey("Range")) {
+                    return null;
+                }
+                java.util.Map<String, String> headers = new java.util.HashMap<>();
+                headers.put("Cache-Control", "no-cache");
+                headers.put("Access-Control-Allow-Origin", "*");
+                try {
+                    InputStream in = getAssets().open("web" + path);
+                    String mime = CanvasGameServer.mimeTypeFor(path);
+                    boolean text = mime.startsWith("text/") || mime.contains("json") || mime.contains("javascript") || mime.contains("xml");
+                    return new WebResourceResponse(mime, text ? "utf-8" : null, 200, "OK", headers, in);
+                } catch (IOException e) {
+                    return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", headers,
+                            new java.io.ByteArrayInputStream(new byte[0]));
+                }
             }
-
         });
-
-
         String ip = getLocalIpAddress();
 
 
         try {
-            CanvasGameServer server = new CanvasGameServer(ip,6868, this);
-            server.start();
+            if (server == null) { // one server per process, also when the activity is created again
+                CanvasGameServer started = new CanvasGameServer(ip, GAME_PORT, getApplicationContext());
+                started.start();
+                server = started;
+            }
 //            System.out.println("Server started at port 6868");
         } catch (IOException e) {
             e.printStackTrace();
@@ -171,7 +205,8 @@ public class MainActivity extends AppCompatActivity {
 
 //        webView.loadUrl("http://10.120.171.38:6868/");
 
-        webView.loadUrl("http://localhost:6868/");
+        // the game is loaded by lockPositive() once the screen direction is chosen: see loadGame()
+        lockPositive();
 
 
     }
@@ -221,7 +256,10 @@ public class MainActivity extends AppCompatActivity {
         webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);  // 允许从HTTPS加载HTTP资源
         webSettings.setDatabaseEnabled(true);// 启用数据库存储，允许网页使用数据库
         webSettings.setAllowFileAccessFromFileURLs(true);
-        webSettings.setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK); // 设置缓存模式为首先尝试加载缓存数据，如果失败再从网络加载m
+        // No HTTP cache: every file comes from the APK. With LOAD_CACHE_ELSE_NETWORK plus clearCache() at start-up,
+        // the first files of a launch could be read from cache entries that were being deleted at that moment and
+        // failed to load, which showed as missing pictures (green boxes) from the second launch on.
+        webSettings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
 
@@ -323,6 +361,36 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private boolean gameLoaded = false;
+
+    /** Load the game once, after the screen direction is settled, so it starts with the final screen size. */
+    private void loadGame() {
+        if (gameLoaded) return;
+        gameLoaded = true;
+        webView.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                webView.loadUrl("http://" + GAME_HOST + ":" + GAME_PORT + "/");
+            }
+        }, 400);
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        // The activity is not recreated on rotation (see android:configChanges), so the game keeps running;
+        // tell the page its size changed.
+        super.onConfigurationChanged(newConfig);
+        hideUIoption();
+        if (webView != null) {
+            webView.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    webView.evaluateJavascript("window.dispatchEvent(new Event('resize'))", null);
+                }
+            }, 300);
+        }
+    }
+
     private void lockPositive(){
         // 创建AlertDialog.Builder对象
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
@@ -338,6 +406,7 @@ public class MainActivity extends AppCompatActivity {
             public void onClick(DialogInterface dialog, int which) {
                 // 用户选择横屏
                 setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+                loadGame();
             }
         });
 
@@ -346,6 +415,7 @@ public class MainActivity extends AppCompatActivity {
             public void onClick(DialogInterface dialog, int which) {
                 // 用户选择竖屏
                 setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                loadGame();
             }
         });
 
@@ -353,6 +423,7 @@ public class MainActivity extends AppCompatActivity {
         builder.setOnCancelListener(new DialogInterface.OnCancelListener() {
             @Override
             public void onCancel(DialogInterface dialog) {
+                loadGame();
                 // 用户取消选择
                 // 这里可以添加取消操作的逻辑
             }

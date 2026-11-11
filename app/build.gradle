@@ -9,7 +9,7 @@ android {
         applicationId "com.mengnieyu.helloworld"
         minSdk 24
         targetSdk 33
-        versionCode 2
+        versionCode 3
         versionName "1.12.2.6"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"

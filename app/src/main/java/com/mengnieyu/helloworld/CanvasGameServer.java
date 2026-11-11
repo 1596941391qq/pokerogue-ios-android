@@ -113,6 +113,35 @@ public class CanvasGameServer extends NanoHTTPD {
 
 
 
+    /** MIME type by file extension, for files served straight from the APK (MainActivity). */
+    static String mimeTypeFor(String filePath) {
+        int dot = filePath.lastIndexOf('.');
+        String ext = dot < 0 ? "" : filePath.substring(dot + 1).toLowerCase();
+        switch (ext) {
+            case "html": return "text/html";
+            case "css": return "text/css";
+            case "js": case "mjs": return "application/javascript";
+            case "json": return "application/json";
+            case "png": return "image/png";
+            case "jpg": case "jpeg": return "image/jpeg";
+            case "gif": return "image/gif";
+            case "webp": return "image/webp";
+            case "svg": return "image/svg+xml";
+            case "mp3": return "audio/mpeg";
+            case "m4a": return "audio/mp4";
+            case "ogg": return "audio/ogg";
+            case "wav": return "audio/wav";
+            case "mp4": return "video/mp4";
+            case "ttf": return "font/ttf";
+            case "woff": return "font/woff";
+            case "woff2": return "font/woff2";
+            case "xml": case "fnt": return "application/xml";
+            case "webmanifest": return "application/manifest+json";
+            case "txt": return "text/plain";
+            default: return "application/octet-stream";
+        }
+    }
+
         // 根据文件扩展名获取MIME类型
     private String getMimeType (String filePath) throws IOException {
 

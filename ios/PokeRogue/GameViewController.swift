@@ -26,6 +26,13 @@ final class GameViewController: UIViewController {
         config.userContentController.addUserScript(WKUserScript(
             source: ConsoleLogger.script, injectionTime: .atDocumentStart, forMainFrameOnly: true
         ))
+        // Dev hook: `SIMCTL_CHILD_PRS_SELFTEST_JS=/path/test.js xcrun simctl launch …` injects a test script.
+        if let path = ProcessInfo.processInfo.environment["PRS_SELFTEST_JS"],
+           let js = try? String(contentsOfFile: path, encoding: .utf8) {
+            config.userContentController.addUserScript(WKUserScript(
+                source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true
+            ))
+        }
         #endif
 
         webView = WKWebView(frame: .zero, configuration: config)

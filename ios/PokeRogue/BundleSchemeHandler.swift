@@ -12,8 +12,11 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
 
     private let root: URL
     private let queue = DispatchQueue(label: "pokerogue.scheme", qos: .userInitiated, attributes: .concurrent)
-    /// Tasks WebKit has cancelled; touching them afterwards raises an exception.
-    private var stopped = Set<ObjectIdentifier>()
+    /// Tasks WebKit has started and not yet cancelled or answered (main thread only). Answering a cancelled
+    /// task raises an exception, so a reply is sent only while its task is still in here. Entries leave the set
+    /// when the task ends: a set of "cancelled" tasks that is never cleared would also match later tasks that
+    /// reuse the same memory address, and those requests would then never be answered.
+    private var active = Set<ObjectIdentifier>()
 
     override init() {
         root = Bundle.main.resourceURL!.appendingPathComponent("web", isDirectory: true).standardizedFileURL
@@ -22,11 +25,13 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         let request = task.request
+        active.insert(ObjectIdentifier(task))
         queue.async { [weak self] in
             guard let self else { return }
             let result = self.load(request)
             DispatchQueue.main.async {
-                guard !self.stopped.contains(ObjectIdentifier(task)) else { return }
+                // `task` is retained by this closure, so its address cannot have been reused yet.
+                guard self.active.remove(ObjectIdentifier(task)) != nil else { return }
                 task.didReceive(result.response)
                 if !result.body.isEmpty { task.didReceive(result.body) }
                 task.didFinish()
@@ -35,7 +40,7 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
-        stopped.insert(ObjectIdentifier(task))
+        active.remove(ObjectIdentifier(task))
     }
 
     // MARK: - File loading
