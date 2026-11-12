@@ -8,6 +8,13 @@
 
 电脑版（Windows / Mac）在另一个仓库：[pokerogue-desktop](https://github.com/1596941391qq/pokerogue-desktop/releases)。PC version (Windows / Mac): [pokerogue-desktop](https://github.com/1596941391qq/pokerogue-desktop/releases).
 
+**下载 / Downloads**
+- GitHub：[Release](https://github.com/1596941391qq/pokerogue-ios-android/releases)（安卓 APK + iOS IPA，全部文件都在这）
+- 夸克网盘（国内下载快，放安卓 APK 和 Windows 包；iOS 和 Mac 只在 GitHub）：<https://pan.quark.cn/s/365049b0755c>
+- 爱发电（下载永远免费，愿意支持的话可以自愿赞助）：<https://afdian.com/a/pokerogues>
+
+Mirror for players in mainland China (Android APK + Windows build): [Quark Drive](https://pan.quark.cn/s/365049b0755c). Everything is free; optional tips via [Afdian](https://afdian.com/a/pokerogues).
+
 #### apk 直接安装可玩
 
 在 [Release](https://github.com/1596941391qq/pokerogue-ios-android/releases) 里下载新打包的 `.apk`，安装即玩，无需登录。
