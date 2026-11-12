@@ -34,12 +34,12 @@ for (const [name, from, to] of PATCHES) {
   done.push(name)
 }
 
-const START = '<!-- prs:compat -->', END = '<!-- /prs:compat -->', TAG = '<script defer src="./coop/qrcode.js"></script><script defer src="./coop/mobile.js"></script>'
+const START = '<!-- prs:compat -->', END = '<!-- /prs:compat -->', TAG = '<script defer src="./coop/qrcode.js"></script><script defer src="./coop/mobile.js"></script><script defer src="./coop/gamepad.js"></script>'
 const indexFile = path.join(web, 'index.html')
 let html = readFileSync(indexFile, 'utf8')
 const a = html.indexOf(START), b = html.indexOf(END)
 if (a >= 0 && b > a) html = html.slice(0, a) + html.slice(b + END.length) // drop the old block, re-add the current one
-html = html.split(TAG).join('')
+html = html.replace(/<script defer src="\.\/coop\/[\w-]+\.js"><\/script>/g, '') // drop tags from an earlier run
 if (count(html, '<head>') !== 1 || count(html, '</head>') !== 1) fail('index.html: expected exactly one <head> and </head>')
 const compat = readFileSync(path.join(root, 'coop-web/compat.js'), 'utf8')
 if (compat.includes('</script')) fail('compat.js must not contain </script')
