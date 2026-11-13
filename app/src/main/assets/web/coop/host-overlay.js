@@ -105,7 +105,12 @@
     // the starter screen's own menus (OPTION_SELECT, CONFIRM...) sit over the same screen: keep the bar at the bottom
     const picking = CoopGame.phaseName() === 'SelectStarterPhase';
     const pos = BAR_POS[mode] || (picking ? BAR_POS.STARTER_SELECT : BAR_POS.default);
-    const sig = [room, on, ever, turn, g.owner, pos.join()].join('|');
+    // each player's money, and how tough the enemies are set (host-team.js)
+    let purse = null, hp = null;
+    try { purse = CoopTeam.purse().money; hp = CoopTeam.hpMult(); } catch {}
+    const cash = n => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e5 ? Math.round(n / 1e3) + 'k' : String(Math.floor(n)));
+    const inRun = !!(scene && scene.currentBattle && scene.getPlayerParty && scene.getPlayerParty().length) && !picking;
+    const sig = [room, on, ever, turn, g.owner, pos.join(), inRun && purse ? purse.p1 + '/' + purse.p2 : '', hp].join('|');
     if (sig === barSig) return;
     barSig = sig;
     bar.removeAll(true);
@@ -116,6 +121,8 @@
       [text(on ? '2P 在线' : (ever ? '2P 掉线' : '2P 未加入') + ' · 1P 代打', on ? CSS.white : CSS2.off, 54)],
     ];
     if (turn && (on || g.owner === 'p1')) parts.push([text(' · ', CSS2.mute, 54)], [text(turn, CSS[g.owner], 54)]);
+    if (inRun && purse) parts.push([text(' · ', CSS2.mute, 54)], [text('1P ₽' + cash(purse.p1), CSS.p1, 54)], [text('  2P ₽' + cash(purse.p2), CSS.p2, 54)]);
+    if (hp) parts.push([text(' · 敌人血×' + hp, CSS2.mute, 54)]);
     const pad = 3, h = Math.ceil(parts[0][0].displayHeight) + 2;
     const w = Math.ceil(parts.reduce((a, p) => a + p[0].displayWidth, 0)) + pad * 2;
     const x0 = Math.round(pos[2] === 'r' ? pos[0] - w : pos[2] === 'l' ? pos[0] : pos[0] - w / 2), y0 = pos[1];

@@ -18,6 +18,7 @@ window.CoopTeam = (function () {
   const log = (...a) => console.log('COOP', ...a.map(x => typeof x === 'string' ? x : JSON.stringify(x)));
   const KEY = 'coop-owners-v1';
   const UI_PARTY = 8, UI_STARTER = 10, OWNERS_KEPT = 2000;
+  const CAP = 3; // each player's share of the game's six party slots
   window.PRS_COOP_TEAMS = true;
   const SWITCHING = [0, 1, 2]; // PartyUiMode SWITCH, FAINT_SWITCH, POST_BATTLE_SWITCH
   const ITEM_ON_MON = [4, 5, 6, 7, 14, 15]; // MODIFIER, MOVE_, TM_, REMEMBER_MOVE_, EVOLUTION_ITEM_, FORM_CHANGE_ITEM_
@@ -50,7 +51,7 @@ window.CoopTeam = (function () {
       changed = true;
       log('owner', (p.getNameToRender ? p.getNameToRender() : p.name) + ' -> ' + label(who));
     });
-    if (fresh) { log('new party: ' + (startersPicked && starterOwners.length === list.length ? 'starter owners ' + starterOwners.join(',') : 'alternating (picked ' + startersPicked + ', owners ' + starterOwners.length + ', party ' + list.length + ')')); startersPicked = false; } // used up by this run
+    if (fresh) { log('new party: ' + (startersPicked && starterOwners.length === list.length ? 'starter owners ' + starterOwners.join(',') : 'alternating (picked ' + startersPicked + ', owners ' + starterOwners.length + ', party ' + list.length + ')')); if (startersPicked) { try { purseNewRun(); } catch (e) { log('purse error', String(e)); } } startersPicked = false; } // used up by this run
     if (changed) {
       // keep owners of Pokémon not in this party too (another save slot); bounded (ids are number-like keys, so what goes beyond the bound is by id, not by age: keep it large)
       const now = {}, old = {};
@@ -67,7 +68,9 @@ window.CoopTeam = (function () {
     // positions are not slots when the left one is gone)
     for (let slot = 0; slot < (b.double ? 2 : 1); slot++) {
       const c = b.turnCommands[slot], p = party()[slot];
-      if (c && c.command === 1 && ownerOf(p)) lastBall = { who: ownerOf(p), wave: b.waveIndex };
+      // when one Pokemon throws, the game writes a BALL command with skip:true for the other slot too:
+      // only the command without skip is the throw
+      if (c && c.command === 1 && !c.skip && ownerOf(p)) lastBall = { who: ownerOf(p), wave: b.waveIndex };
     }
   }
 
@@ -76,15 +79,50 @@ window.CoopTeam = (function () {
   function askerFor(slot, forced) {
     const p = party()[slot], who = ownerOf(p);
     if (!who) return null;
+    if (forced) { // a slot to refill: the teammate takes it when they have nobody on the field and can send one
+      const x = other(who);
+      if (!party().some(q => owners[q.id] === x && q.isOnField() && !q.isFainted()) && canSendOut(x)) return x;
+    }
     return !forced || canSendOut(who) || !canSendOut(other(who)) ? who : other(who);
   }
 
+  // both field slots hold this player's Pokemon (the teammate had nothing left to send out)
+  function holdsBoth(who) {
+    const b = scene().currentBattle, l = party();
+    return !!(b && b.double && l[0] && l[1] && l[0].isOnField() && l[1].isOnField() && ownerOf(l[0]) === who && ownerOf(l[1]) === who);
+  }
+  // ... and the teammate can fight again (revived): which slot goes back to them, and with which Pokemon
+  function slotToReturn() {
+    const l = party(), w = ownerOf(l[0]);
+    if (!w || !holdsBoth(w) || l[0].isFainted() || l[1].isFainted()) return null;
+    const x = other(w), slot = l.findIndex((p, i) => i > 1 && owners[p.id] === x && !p.isFainted());
+    return slot < 0 ? null : { who: x, field: x === 'p1' ? 0 : 1, slot };
+  }
+  function patchTurnInit(proto) {
+    if (proto.__coopRet) return;
+    proto.__coopRet = true;
+    const start = proto.start;
+    proto.start = function () {
+      try {
+        const r = slotToReturn(), s = scene();
+        if (r) {
+          const l = party(), out = l[r.field], back = l[r.slot];
+          log('slot ' + r.field + ' back to ' + label(r.who) + ': ' + back.name + ' in for ' + out.name);
+          s.phaseManager.unshiftNew('SwitchSummonPhase', s.currentBattle.turn <= 1 ? 0 : 1, r.field, r.slot, true);
+        }
+      } catch (e) { log('slot return error', String(e)); }
+      return start.apply(this, arguments);
+    };
+  }
   const notYours = o => '这只是 ' + label(o) + ' 的宝可梦，选你自己的';
   // who threw the ball that caught something this wave (the party-full release question is theirs)
   function catcher() {
     const b = scene().currentBattle;
     return lastBall && b && lastBall.wave === b.waveIndex ? lastBall.who : null;
   }
+  // The game asks "party full, release one?" only at six. The co-op build also asks this hook (see the
+  // "full" patch in patch-coop.mjs / patch-web.mjs): the catcher already has their three.
+  window.PRS_COOP_FULL = () => { try { const w = catcher(); return !!w && count(w) >= CAP; } catch { return false; } };
   // ---- the party menu only offers your own Pokémon ----
   function hookParty(s) {
     const h = s.ui && s.ui.handlers && s.ui.handlers[UI_PARTY];
@@ -112,6 +150,7 @@ window.CoopTeam = (function () {
             const r = base ? base(p, ...rest) : null;
             if (r) return r;
             const o = ownerOf(p);
+            if (o && o !== who && switching && holdsBoth(who)) return null; // hand the slot back to the teammate
             if (o && o !== who && (!switching || mode !== 1 || canSendOut(who))) return notYours(o);
             return null;
           };
@@ -148,7 +187,8 @@ window.CoopTeam = (function () {
     wrap('processReleaseOption', function (pokemon) {
       const mode = this.partyUiMode, who = mode === 10 ? catcher() : rewardPicker() || this.__coopAsker, o = ownerOf(pokemon);
       if (!who || !o) return null;
-      if (o !== who) return () => refuse(this, notYours(o));
+      // after a catch: your own; the teammate's only when they hold more than their three and you fewer
+      if (o !== who && !(mode === 10 && count(who) < CAP && count(o) > CAP)) return () => refuse(this, notYours(o));
       if (mode !== 10 && count(who) <= 1) return () => refuse(this, '这是你最后一只宝可梦，不能放生');
       return null;
     });
@@ -197,9 +237,10 @@ window.CoopTeam = (function () {
     if (!h || !h.active) return null;
     const b = starterBudget(h);
     if (b.full) return null;
+    const can = w => b.picks[w] < CAP && b.left[w] >= b.min; // three each at most
     let who = b.picks.p1 <= b.picks.p2 ? 'p1' : 'p2';
-    if (b.left[who] < b.min && b.left[other(who)] >= b.min) who = other(who);
-    return b.left[who] >= b.min ? who : null;
+    if (!can(who)) who = other(who);
+    return can(who) ? who : null;
   }
   function hookStarters(s) {
     const h = s.ui && s.ui.handlers && s.ui.handlers[UI_STARTER];
@@ -344,29 +385,48 @@ window.CoopTeam = (function () {
       }
       return ph;
     };
+    // the game starts a turn with `new TurnInitPhase` (not through create), so patch its class right away
+    try { patchTurnInit(Object.getPrototypeOf(create.call(pm, 'TurnInitPhase'))); } catch (e) { log('turn hook error', String(e)); }
     log('rewards: 5 选 2 on');
   }
 
-  // ---- two players: every enemy has double HP ----
-  // hacking 11-12: with two players the enemies are twice as tough as in single player, on top of the double
-  // battles. Every enemy Pokémon of the battle (wild, trainer's whole party, bosses, mystery encounters) gets
-  // twice the max HP the game would give it; nothing else (level, other stats, rewards) changes.
+  // ---- two players: tougher enemies ----
+  // hacking 11-12: with two players the enemies get more HP than in single player, on top of the double
+  // battles. 11-13 (players found twice too hard): the host picks 1, 1.5 or 2 times (localStorage
+  // coop-enemy-hp, default 1.5), and a battle the game forces to be single (some mystery encounters) is left
+  // at the game's own HP, because only one of the two can fight there.
+  // Every enemy Pokémon of a double battle (wild, trainer's whole party, bosses) gets that many times the
+  // max HP the game would give it; nothing else (level, other stats, rewards) changes.
   // Nothing is remembered between sessions: the normal max HP is recomputed with the game's own
-  // calculateStats, so an enemy rebuilt from a save is set to exactly double again, never four times.
-  function doubleHp(e) {
+  // calculateStats, so an enemy rebuilt from a save is set to exactly the multiple again, never twice over.
+  const HP_KEY = 'coop-enemy-hp', HP_CHOICES = [1, 1.5, 2];
+  function hpMult() {
+    let v = NaN;
+    try { v = Number(localStorage.getItem(HP_KEY)); } catch {}
+    return HP_CHOICES.includes(v) ? v : 1.5;
+  }
+  function setHpMult(v) {
+    v = Number(v);
+    if (!HP_CHOICES.includes(v)) return hpMult();
+    try { localStorage.setItem(HP_KEY, String(v)); } catch {}
+    log('enemy HP setting: x' + v + ' (from the next enemies on)');
+    return v;
+  }
+  function scaleHp(e, mult) {
     if (e.__coopX2 || !e.stats || typeof e.calculateStats !== 'function') return;
     const calc = e.calculateStats, hp0 = e.hp, max0 = e.stats[0];
-    calc.call(e); // the game's own numbers (also undoes a doubled value that came back from a save)
+    calc.call(e); // the game's own numbers (also undoes a multiplied value that came back from a save)
     const base = e.stats[0];
     if (!(base > 1)) { e.__coopX2 = true; return; } // 1 HP by design (Shedinja): left alone
     const share = max0 > 0 ? Math.min(1, hp0 / max0) : 1; // how full it was before
-    e.stats[0] = base * 2;
-    e.hp = hp0 > 0 ? Math.max(1, Math.round(share * base * 2)) : 0;
+    const top = Math.round(base * mult);
+    e.stats[0] = top;
+    e.hp = hp0 > 0 ? Math.max(1, Math.round(share * top)) : 0;
     e.__coopX2 = true;
-    e.calculateStats = function () { // the game recalculates stats (form change, level...): keep the doubling
+    if (mult !== 1) e.calculateStats = function () { // the game recalculates stats (form change, level...): keep the multiple
       const hp1 = this.hp, max1 = this.stats ? this.stats[0] : 0;
       const r = calc.apply(this, arguments);
-      const max = this.stats[0] * 2;
+      const max = Math.round(this.stats[0] * mult);
       this.stats[0] = max;
       if (hp1 > 0) this.hp = Math.min(max, hp1 + Math.max(0, max - max1));
       return r;
@@ -377,14 +437,187 @@ window.CoopTeam = (function () {
   function enemyRule() {
     const s = scene(), b = s.currentBattle;
     if (!b || !b.enemyParty) return;
-    const done = [];
+    const mult = b.double ? hpMult() : 1, done = [];
     for (const e of b.enemyParty) {
       if (!e || e.__coopX2) continue;
-      const base = doubleHp(e);
+      const base = scaleHp(e, mult);
       if (base) done.push(e.name + ' ' + base + '->' + e.stats[0] + (e.isBoss && e.isBoss() ? ' (boss)' : ''));
     }
-    if (done.length) { log('enemy HP x2 wave ' + b.waveIndex + ': ' + done.join(', ')); }
+    if (done.length) { log('enemy HP x' + mult + ' wave ' + b.waveIndex + (b.double ? '' : ' (single battle)') + ': ' + done.join(', ')); }
   }
+
+  // ---- each player's own money and Poké Balls ----
+  // The game has one wallet and one ball pouch. Here each player has their own, and the game's two fields
+  // (scene.money, scene.pokeballCounts) become views: while something is one player's business the game
+  // reads and writes that player's share; otherwise it sees the two added together.
+  // - Whose business: the reward screen is the picker's (buying, rerolling, a money or ball reward picked);
+  //   a Pokémon choosing its command is its owner's (the ball menu shows their balls); a throw is the
+  //   thrower's; a mystery encounter is its decider's.
+  // - Anything else that comes in (prize money after a battle) is split in half; anything else that goes
+  //   out is taken half each.
+  // - The save file keeps the totals, as the game expects, plus one extra block "coop" that the game itself
+  //   ignores: who owns each Pokémon of the party and each player's money and balls at that moment. Loading
+  //   that save (next session, another device, an exported file) puts both back. A copy of the split is also
+  //   kept here by run seed. Either is used only if it still adds up to the totals in the save (otherwise:
+  //   half each).
+  const PURSE_KEY = 'coop-purse-v1', PURSES_KEPT = 30;
+  const purse = { seed: null, money: { p1: 0, p2: 0 }, balls: { p1: {}, p2: {} }, keys: ['0', '1', '2', '3', '4'], flip: 0, dirty: false, until: 0, last: null };
+  let asTotal = 0; // > 0 while the game builds its save data: totals, whoever's turn it is
+  const fromSave = {}; // run seed -> the "coop" block of a save the game has read
+  let ownSeed = null; // the run whose owners were last taken from its save
+  const mePicker = wave => { let w = wave % 2 ? 'p1' : 'p2'; if (!count(w) && count(other(w))) w = other(w); return w; };
+  function actor() {
+    if (asTotal) return null;
+    let ph = null;
+    try { ph = scene().phaseManager.getCurrentPhase(); } catch {}
+    if (!ph || !ph.phaseName) return null;
+    const n = ph.phaseName;
+    if (n === 'SelectModifierPhase') return (ph.__coop && ph.__coop.picker) || null;
+    if (n === 'CommandPhase' || n === 'SelectTargetPhase') return ownerOf(party()[ph.fieldIndex]);
+    if (n === 'AttemptCapturePhase') return catcher();
+    if (n.indexOf('MysteryEncounter') >= 0) { const b = scene().currentBattle; return b ? mePicker(b.waveIndex || 0) : null; }
+    return null;
+  }
+  // change one player's share, or both: what comes in is halved, what goes out is taken half each
+  function give(box, who, d) {
+    if (!d) return;
+    if (who) { box[who] = Math.max(0, (box[who] || 0) + d); return; }
+    box.p1 = box.p1 || 0; box.p2 = box.p2 || 0;
+    if (d > 0) {
+      const half = Math.floor(d / 2), odd = d - 2 * half;
+      box.p1 += half; box.p2 += half;
+      if (odd) { box[purse.flip ? 'p2' : 'p1'] += odd; purse.flip ^= 1; }
+    } else {
+      let out = -d;
+      const a = Math.min(box.p1, Math.ceil(out / 2)); box.p1 -= a; out -= a;
+      const c = Math.min(box.p2, out); box.p2 -= c; out -= c;
+      box.p1 = Math.max(0, box.p1 - out);
+    }
+  }
+  const ballBox = k => ({ p1: purse.balls.p1[k] || 0, p2: purse.balls.p2[k] || 0 });
+  const ballsSeen = (k, who) => (who ? purse.balls[who][k] || 0 : (purse.balls.p1[k] || 0) + (purse.balls.p2[k] || 0));
+  const isBall = k => typeof k === 'string' && /^\d+$/.test(k);
+  const ballView = new Proxy({}, {
+    get: (t, k) => (isBall(k) ? ballsSeen(k, actor()) : undefined),
+    set: (t, k, v) => {
+      if (!isBall(k)) return true;
+      const who = actor(), box = ballBox(k);
+      give(box, who, (Number(v) || 0) - ballsSeen(k, who));
+      purse.balls.p1[k] = box.p1; purse.balls.p2[k] = box.p2;
+      if (!purse.keys.includes(k)) purse.keys.push(k);
+      purse.dirty = true;
+      return true;
+    },
+    has: (t, k) => isBall(k) && purse.keys.includes(k),
+    ownKeys: () => purse.keys.slice(),
+    getOwnPropertyDescriptor: (t, k) => (isBall(k) && purse.keys.includes(k) ? { value: ballsSeen(k, actor()), writable: true, enumerable: true, configurable: true } : undefined),
+  });
+  const totals = () => {
+    const balls = {};
+    purse.keys.forEach(k => { balls[k] = ballsSeen(k, null); });
+    return { money: purse.money.p1 + purse.money.p2, balls };
+  };
+  function hookPurse(s) {
+    if (s.__coopPurse || !('money' in s) || !s.pokeballCounts || !s.gameData) return;
+    s.__coopPurse = true;
+    const money0 = Math.floor(Number(s.money) || 0), balls0 = s.pokeballCounts;
+    Object.defineProperty(s, 'money', {
+      configurable: true, enumerable: true,
+      get: () => { const who = actor(); return who ? purse.money[who] : purse.money.p1 + purse.money.p2; },
+      set: v => {
+        const who = actor(), now = who ? purse.money[who] : purse.money.p1 + purse.money.p2;
+        give(purse.money, who, (Number(v) || 0) - now);
+        purse.dirty = true;
+      },
+    });
+    Object.defineProperty(s, 'pokeballCounts', {
+      configurable: true, enumerable: true,
+      get: () => ballView,
+      set: obj => { // the game puts a new pouch in place (new run): split it
+        purse.keys = Object.keys(obj || {});
+        purse.balls = { p1: {}, p2: {} };
+        purse.keys.forEach(k => { const box = { p1: 0, p2: 0 }; give(box, null, Number(obj[k]) || 0); purse.balls.p1[k] = box.p1; purse.balls.p2[k] = box.p2; });
+        purse.dirty = true;
+      },
+    });
+    s.money = money0;
+    s.pokeballCounts = balls0;
+    // the save file gets the totals, as plain numbers
+    const save = s.gameData.getSessionSaveData;
+    if (typeof save === 'function') s.gameData.getSessionSaveData = function () {
+      asTotal++;
+      try {
+        const r = save.apply(this, arguments);
+        if (r && typeof r === 'object') {
+          const t = totals(), own = {};
+          party().forEach(p => { if (owners[p.id]) own[p.id] = owners[p.id]; });
+          r.money = Math.floor(t.money); r.pokeballCounts = t.balls;
+          // keys here must not be ones the game's save reader converts (party, modifiers, arena, trainer...)
+          r.coop = { v: 1, own, cash: { p1: purse.money.p1, p2: purse.money.p2 }, pb: { p1: { ...purse.balls.p1 }, p2: { ...purse.balls.p2 } } };
+          if (r.seed) { // the same split by seed, for a save written before this block existed in it
+            const all = purseStore();
+            all[r.seed] = { money: r.coop.cash, balls: r.coop.pb, t: Date.now() };
+            const ids = Object.keys(all).sort((a, b) => (all[a].t || 0) - (all[b].t || 0));
+            ids.slice(0, Math.max(0, ids.length - PURSES_KEPT)).forEach(id => { delete all[id]; });
+            try { localStorage.setItem(PURSE_KEY, JSON.stringify(all)); } catch {}
+          }
+        }
+        return r;
+      } finally { asTotal--; }
+    };
+    // reading a save: remember its co-op block; loading one: take owners and the split from it again
+    const parse = s.gameData.parseSessionData;
+    if (typeof parse === 'function') s.gameData.parseSessionData = function () {
+      const r = parse.apply(this, arguments);
+      try { if (r && r.seed && r.coop && r.coop.v === 1) fromSave[r.seed] = r.coop; } catch {}
+      return r;
+    };
+    const load = s.gameData.loadSession;
+    if (typeof load === 'function') s.gameData.loadSession = function () {
+      const r = load.apply(this, arguments);
+      Promise.resolve(r).then(() => { ownSeed = null; purse.seed = null; }, () => {});
+      return r;
+    };
+    log('purse: own money and balls on (' + money0 + ' to split)');
+  }
+  // owners of a loaded run come from its save (this device may never have seen that run)
+  function ownersFromSave(s) {
+    if (!s.seed || s.seed === ownSeed || !party().length) return;
+    ownSeed = s.seed;
+    const c = fromSave[s.seed];
+    if (!c || !c.own) return;
+    let n = 0;
+    party().forEach(p => { const w = c.own[p.id]; if ((w === 'p1' || w === 'p2') && owners[p.id] !== w) { owners[p.id] = w; n++; } });
+    if (n) { try { localStorage.setItem(KEY, JSON.stringify(owners)); } catch {} log('owners: ' + n + ' taken from the save'); }
+  }
+  const purseStore = () => { try { return JSON.parse(localStorage.getItem(PURSE_KEY) || '{}') || {}; } catch { return {}; } };
+  function purseTick(s) {
+    if (!s.__coopPurse) return;
+    const now = Date.now();
+    if (s.seed !== purse.seed) { purse.seed = s.seed; purse.until = now + 4000; } // another run, or this one loaded again: its split is in the save
+    if (purse.until) {
+      const t = totals(), sv = fromSave[purse.seed], kept = purseStore()[purse.seed];
+      const fits = o => o && o.money && o.balls && o.money.p1 + o.money.p2 === t.money
+        && purse.keys.every(k => ((o.balls.p1 || {})[k] || 0) + ((o.balls.p2 || {})[k] || 0) === t.balls[k]);
+      const old = [sv && { money: sv.cash, balls: sv.pb, from: 'the save' }, kept && { ...kept, from: 'this device' }].find(fits);
+      if (old && t.money + purse.keys.reduce((a, k) => a + t.balls[k], 0) > 0) {
+        purse.money = { p1: old.money.p1, p2: old.money.p2 };
+        purse.balls = { p1: { ...old.balls.p1 }, p2: { ...old.balls.p2 } };
+        purse.until = 0;
+        log('purse: split restored from ' + old.from + ', money ' + purse.money.p1 + ' / ' + purse.money.p2);
+      } else if (now > purse.until) purse.until = 0;
+    }
+    // the number on screen is whoever's business it is now: redraw it when that changes
+    const who = actor();
+    if (who !== purse.last) { purse.last = who; try { s.updateMoneyText(); } catch {} }
+  }
+  // a new run: the game hands out five Poké Balls; here each player starts with five
+  function purseNewRun() {
+    const t = totals();
+    if (t.balls['0'] === 5 && purse.keys.every(k => k === '0' || !t.balls[k])) { purse.balls.p1['0'] = 5; purse.balls.p2['0'] = 5; purse.dirty = true; }
+    log('purse: new run, money ' + purse.money.p1 + ' / ' + purse.money.p2 + ', balls 5 each');
+  }
+  const purseNow = () => ({ money: { p1: purse.money.p1, p2: purse.money.p2 }, balls: { p1: { ...purse.balls.p1 }, p2: { ...purse.balls.p2 } } });
 
   // ---- one shared question: who answers ----
   // null when the current phase is not a shared question. Mystery encounter: the one who does NOT get the
@@ -398,7 +631,7 @@ window.CoopTeam = (function () {
     if (!ph || !b) return null;
     const wave = b.waveIndex || 0, name = ph.phaseName;
     let who = null;
-    if (name === 'MysteryEncounterPhase') who = wave % 2 ? 'p1' : 'p2';
+    if (name === 'MysteryEncounterPhase') return mePicker(wave);
     else if (name === 'SelectBiomePhase') who = Math.floor(wave / 10) % 2 ? 'p1' : 'p2';
     else if (name === 'EvolutionPhase' || name === 'FormChangePhase') who = ownerOf(ph.pokemon);
     if (who && !count(who) && count(other(who))) who = other(who); // someone with no Pokémon does not answer
@@ -408,7 +641,7 @@ window.CoopTeam = (function () {
   setInterval(() => {
     const s = scene();
     if (!s || !s.phaseManager) return;
-    try { hookPhases(s); hookParty(s); hookStarters(s); watchBalls(); assign(); enemyRule(); } catch (e) { log('team error', String(e)); }
+    try { hookPhases(s); hookParty(s); hookStarters(s); hookPurse(s); watchBalls(); ownersFromSave(s); assign(); enemyRule(); purseTick(s); } catch (e) { log('team error', String(e)); }
   }, 150);
 
   // the reward round on screen now: {round, picker} or null; a special one-pick reward has single: true
@@ -416,5 +649,5 @@ window.CoopTeam = (function () {
     const s = scene();
     try { const ph = s.phaseManager.getCurrentPhase(); return ph && ph.phaseName === 'SelectModifierPhase' && ph.__coop ? ph.__coop : null; } catch { return null; }
   }
-  return { ownerOf, askerFor, canSendOut, reward, sharedPicker, catcher, starters, label, other, owners: () => owners, starterOwners: () => starterOwners.slice() };
+  return { ownerOf, askerFor, canSendOut, reward, sharedPicker, catcher, starters, label, other, count, CAP, hpMult, setHpMult, purse: purseNow, actor, owners: () => owners, starterOwners: () => starterOwners.slice() };
 })();

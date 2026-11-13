@@ -27,6 +27,8 @@ window.CoopGame = (function () {
     CheckSwitchPhase: { who: (ph, s) => T.ownerOf(s.getPlayerParty()[ph.fieldIndex]), mon: (ph, s) => s.getPlayerParty()[ph.fieldIndex], what: n => '要不要换下' + n },
     SwitchPhase: { who: ph => T.askerFor(ph.fieldIndex, ph.isModal), mon: (ph, s) => s.getPlayerParty()[ph.fieldIndex], what: () => '选谁上场' },
     LearnMovePhase: { who: ph => T.ownerOf(ph.getPokemon()), mon: ph => ph.getPokemon(), what: n => n + '要学新招式' },
+    // a catch (and its "your team is full, release one?") is the thrower's
+    AttemptCapturePhase: { who: () => T.catcher(), mon: ph => ph.getPokemon(), what: n => '收服' + n },
   }; // Command enum: FIGHT 0, BALL 1, POKEMON 2, RUN 3
   // field slot -> owner (falls back to slot 0 = 1P, slot 1 = 2P for a Pokémon not assigned yet)
   const whoAt = (s, slot) => T.ownerOf(s.getPlayerField()[slot]) || (slot === 1 ? 'p2' : 'p1');
@@ -303,7 +305,10 @@ window.CoopGame = (function () {
       };
     });
     mons.sort((a, b) => (a.who > b.who) - (a.who < b.who)); // 1P's first, then 2P's
-    return { mons, bag: s.modifiers.filter(m => !('pokemonId' in m)).map(itemName), money: s.money };
+    // each player's own money and balls (host-team.js); money stays the total for an older phone page
+    const purse = typeof T.purse === 'function' ? T.purse() : null;
+    return { mons, bag: s.modifiers.filter(m => !('pokemonId' in m)).map(itemName), money: purse ? purse.money.p1 + purse.money.p2 : s.money,
+      purse, cap: T.CAP || null, hp: typeof T.hpMult === 'function' ? T.hpMult() : null };
   }
   setInterval(() => {
     const s = window.PRS_SCENE;

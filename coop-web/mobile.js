@@ -127,6 +127,25 @@
       for (var y = 0; y < m.size; y++) for (var x = 0; x < m.size; x++) if (m.data[y * m.size + x]) g.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);
     } catch (e) { rawLog.call(console, 'coop qr failed ' + e); }
   }
+  // Enemy HP with two players: the host picks (coop/host-team.js reads the same localStorage key).
+  var HP_CHOICES = [[1, '1 倍 简单'], [1.5, '1.5 倍 标准'], [2, '2 倍 困难']];
+  function hpNow() { var v = NaN; try { v = Number(localStorage.getItem('coop-enemy-hp')); } catch (e) {} return v === 1 || v === 2 ? v : 1.5; }
+  function hpRow() {
+    var row = el('div', { class: 'row' }, []);
+    function draw() {
+      row.innerHTML = '';
+      var now = hpNow();
+      HP_CHOICES.forEach(function (c) {
+        row.appendChild(el('button', { class: c[0] === now ? '' : 'sub', text: c[1], onclick: function () {
+          try { localStorage.setItem('coop-enemy-hp', String(c[0])); } catch (e) {}
+          if (window.CoopTeam && window.CoopTeam.setHpMult) window.CoopTeam.setHpMult(c[0]);
+          draw();
+        } }));
+      });
+    }
+    draw();
+    return row;
+  }
   function closePanel() { if (panel) { panel.remove(); panel = null; } }
   function showPanel() {
     closePanel();
@@ -138,7 +157,9 @@
         el('div', { class: 'row' }, [el('button', { text: '开房间（我当 1P）', onclick: openRoom }), el('button', { class: 'sub', text: '关闭', onclick: closePanel })]),
         el('p', { text: '开房间后把二维码或链接发给朋友，朋友用手机或电脑的浏览器打开就能当 2P，不用装游戏。' }),
         el('div', { class: 'row' }, [input, el('button', { class: 'sub', text: '加入房间', onclick: function () { join(input.value); } })]),
-        el('p', { text: '加入朋友开的房间会跳到浏览器里玩。合作规则（双打、各自 10 点、5 选 2）只对开房间之后新开的一局生效。两边都要联网。' }),
+        el('p', { text: '敌人血量（两个人打，敌人比单人更耐打；改了从下一场战斗起生效）' }),
+        hpRow(),
+        el('p', { text: '加入朋友开的房间会跳到浏览器里玩。合作规则（双打、各自 10 点和 3 个队伍位置、钱和精灵球各一份、5 选 2）只对开房间之后新开的一局生效。两边都要联网。' }),
       ]);
     } else {
       var qr = el('canvas', { id: 'prsCoopQr' }), copy = el('button', { class: 'sub', text: '复制链接' });
@@ -154,7 +175,9 @@
         ])]),
         el('div', { class: 'row' }, [linkBox]),
         el('div', { class: 'row' }, btns),
-        el('p', { text: '朋友扫码或打开链接就能加入（手机、电脑浏览器都行）。请在标题画面开房间，再开始新游戏。' }),
+        el('p', { text: '朋友扫码或打开链接就能加入（手机、电脑浏览器都行）。请在标题画面开房间，再开始新游戏或读取合作存档。' }),
+        el('p', { text: '敌人血量（改了从下一场战斗起生效）' }),
+        hpRow(),
         el('div', { class: 'row' }, [el('button', { class: 'bad', text: '关闭房间', onclick: closeRoom })]),
       ]);
       drawQr(qr);

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Apply this project's additions to the game build in app/src/main/assets/web (run by scripts/sync-pokerogue.sh
 // after every sync, or alone: node scripts/patch-web.mjs). Safe to run again: every step checks if it is done.
-// 1. Co-op hooks in assets/battle-scene-*.js (same three as the desktop app; they change nothing while no
+// 1. Co-op hooks in assets/battle-scene-*.js (same four as the desktop app; they change nothing while no
 //    room is open): doubles + doubled starter points only while window.PRS_COOP_TEAMS is set, and the battle
-//    scene exposed as window.PRS_SCENE.
+//    scene exposed as window.PRS_SCENE, and the "party full" question after a catch also asked at three each.
 // 2. coop-web/ is copied to web/coop/ (host scripts, QR encoder, the "联机" panel).
 // 3. index.html gets coop-web/compat.js inlined at the top of <head> (message instead of a blank screen on
 //    system browsers that are too old, reload button when the game fails to load) and a tag for coop/mobile.js.
@@ -20,6 +20,8 @@ const PATCHES = [
   ['doubles', 'doCheckDoubleOverride(e){switch(bl.FIELD_SIZE_OVERRIDE){', 'doCheckDoubleOverride(e){switch(window.PRS_COOP_TEAMS?`double`:bl.FIELD_SIZE_OVERRIDE){'],
   ['scene', 'window.gameInfo=t}getActiveKeys(){', 'window.gameInfo=t;window.PRS_SCENE=this}getActiveKeys(){'],
   ['points', 'default:e.value=10}return In(1,e),e.value}', 'default:e.value=10}return In(1,e),e.value*(window.PRS_COOP_TEAMS?2:1)}'],
+  // after a catch, ask "party full, release one?" also when the catcher already has their three of the six slots
+  ['full', 'if(B.getPlayerParty().length===6){let e={options:[{label:q.t(`partyUiHandler:summary`)', 'if(B.getPlayerParty().length===6||window.PRS_COOP_FULL&&window.PRS_COOP_FULL()){let e={options:[{label:q.t(`partyUiHandler:summary`)'],
 ]
 const files = readdirSync(path.join(web, 'assets')).filter(f => /^battle-scene-.*\.js$/.test(f))
 if (files.length !== 1) fail(`expected one assets/battle-scene-*.js in ${web}, found ${files.length}`)

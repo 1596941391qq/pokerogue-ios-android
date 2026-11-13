@@ -32,6 +32,27 @@ window.CoopLink = (function () {
   if (!canvas) return log('no canvas');
   await sleep(3000);
   const stream = canvas.captureStream(30);
+  // Sharp picture for the guest. Left alone, the browser shrinks the picture when the encoder or the network
+  // is short (players' reports: 1920x1080 falling to 640x360 and 320x180, which is what looks blurry on the
+  // guest's screen). So: send 1280x720 always (the game is 320x180 pixel art, 720p is an exact 4x), tell the
+  // encoder the content is detail, not motion, and let it drop frames instead of resolution.
+  const VIDEO = { down: 1.5, maxBitrate: 3000000, fps: 30 };
+  try { stream.getVideoTracks()[0].contentHint = 'detail'; } catch {}
+  async function tuneVideo(conn) {
+    try {
+      const snd = conn.getSenders().find(x => x.track && x.track.kind === 'video');
+      if (!snd) return;
+      const prm = snd.getParameters();
+      if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
+      const h = canvas.height || 1080;
+      prm.encodings[0].scaleResolutionDownBy = h > 720 ? h / 720 : 1;
+      prm.encodings[0].maxBitrate = VIDEO.maxBitrate;
+      prm.encodings[0].maxFramerate = VIDEO.fps;
+      prm.degradationPreference = 'maintain-resolution';
+      await snd.setParameters(prm);
+      log('video: ' + canvas.width + 'x' + canvas.height + ' sent at 1/' + prm.encodings[0].scaleResolutionDownBy.toFixed(2) + ', keeps resolution');
+    } catch (e) { log('video tuning not applied', String(e)); }
+  }
 
   // The game's sound for the guest: tap Phaser's WebAudio master (before the host's own master-volume
   // node, so the host turning the game down does not silence the guest) into a MediaStream track.
@@ -73,12 +94,22 @@ window.CoopLink = (function () {
   if (tc) new MutationObserver(() => CoopLink.send({ ui: uiMode() })).observe(tc, { attributes: true, attributeFilter: ['data-ui-mode'] });
 
   let pc = null, ice = null, timer = null, gathered = {}, startGen = 0;
-  // guest keys held right now, released when the guest drops so nothing sticks
-  const held = new Set();
+  // A guest press is a tap: the key goes down here and comes up again after TAP_MS, whenever the guest's own
+  // release arrives. (Before 11-13 the key stayed down until the release message came; when that message was
+  // late on a bad network the game saw a held key and repeated it, "one press jumps five or six".) Holding a
+  // button to repeat is done by the guest page, which sends a press every so often while the button is held.
+  const TAP_MS = 80, HOST_V = 2; // HOST_V goes to the guest so its page knows the host makes taps
+  const held = new Set(), upTimer = {};
+  function release(btn) { clearTimeout(upTimer[btn]); delete upTimer[btn]; if (held.delete(btn)) press(btn, false); }
+  function guestPress(btn) {
+    if (held.has(btn)) release(btn);
+    press(btn, true); held.add(btn);
+    upTimer[btn] = setTimeout(() => release(btn), TAP_MS);
+  }
   function dropped(why) {
     if (!CoopLink.online()) return;
     log('guest link down: ' + why);
-    held.forEach(b => press(b, false)); held.clear();
+    [...held].forEach(release);
     CoopLink._close();
   }
   const sig = new Coop.Signal(room, 'host');
@@ -102,8 +133,9 @@ window.CoopLink = (function () {
       if (mine !== pc) return;
       log('state', mine.connectionState);
       if (['disconnected', 'failed', 'closed'].includes(mine.connectionState)) dropped(mine.connectionState);
-      else if (mine.connectionState === 'connected' && dc.readyState === 'open' && !CoopLink.online()) { dc.send(JSON.stringify({ ui: uiMode() })); CoopLink._open(); }
+      else if (mine.connectionState === 'connected' && dc.readyState === 'open' && !CoopLink.online()) { dc.send(JSON.stringify({ ui: uiMode(), hv: HOST_V })); CoopLink._open(); }
       if (mine.connectionState === 'connected') {
+        tuneVideo(mine);
         let n = 0;
         const send = async () => Coop.report({ role: 'host', room, n: n++, state: mine.connectionState, gathered, device: Coop.device(), ...(await Coop.stats(mine)) });
         setTimeout(send, 5000);
@@ -115,18 +147,19 @@ window.CoopLink = (function () {
     dc.onmessage = e => {
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
-      // a press can be refused by the turn rules (host-game.js); releases always pass so no key sticks
-      if (m.btn && (!m.down || CoopLink._allow(m.btn, m.down))) { press(m.btn, m.down); m.down ? held.add(m.btn) : held.delete(m.btn); }
+      // a press can be refused by the turn rules (host-game.js)
+      if (m.btn && m.down && CoopLink._allow(m.btn, true)) guestPress(m.btn); // the release is ours (TAP_MS), the guest's is ignored
       if (m.ping) dc.send(JSON.stringify({ pong: m.ping }));
       CoopLink._msg(m);
     };
     CoopLink._bind(m => { if (dc.readyState === 'open') dc.send(JSON.stringify(m)); });
     window.PRS_COOP_SEND = CoopLink.send; // older test scripts
-    dc.onopen = () => { if (mine !== pc) return; dc.send(JSON.stringify({ ui: uiMode() })); CoopLink._open(); };
+    dc.onopen = () => { if (mine !== pc) return; dc.send(JSON.stringify({ ui: uiMode(), hv: HOST_V })); CoopLink._open(); };
     dc.onclose = () => { if (mine === pc) dropped('channel closed'); };
     stream.getTracks().forEach(t => mine.addTrack(t, stream));
     const offer = await mine.createOffer();
     await mine.setLocalDescription(offer);
+    tuneVideo(mine);
     if (mine !== pc) return; // replaced while the offer was being made
     sig.send({ type: 'offer', sdp: offer.sdp, n: gen }); // n: the guest echoes it in its answer
     setTimeout(() => { if (mine === pc && mine.connectionState !== 'connected') Coop.report({ role: 'host', room, state: 'stuck-' + mine.iceConnectionState, gathered, device: Coop.device() }); }, 20000);
