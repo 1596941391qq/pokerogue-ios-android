@@ -6,9 +6,11 @@ public class CustomStatus implements IStatus {
     protected int code;
     protected String description;
 
-    public CustomStatus(int code, String descriptcion) {
+    public CustomStatus(int code, String text) {
         this.code = code;
-        this.description = description;
+        // the status line is "HTTP/1.1 " + description, so it has to be "200 OK" (it used to be left null,
+        // which sent "HTTP/1.1 null": the WebView put up with that, other browsers do not have to)
+        this.description = code + " " + text;
     }
     @Override
     public int getRequestStatus() {

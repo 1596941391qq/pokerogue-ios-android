@@ -168,6 +168,9 @@ public class MainActivity extends AppCompatActivity {
                     path = (path == null ? "/" : path) + "index.html";
                 }
                 path = path.replaceAll("/{2,}", "/"); // the game asks for "images//logo.png"
+                if (path.startsWith("/coop/api/")) {
+                    return null; // LAN co-op signaling: answered by the local server (CoopLan)
+                }
                 String lower = path.toLowerCase();
                 if (lower.endsWith(".mp4") || lower.endsWith(".webm") || request.getRequestHeaders().containsKey("Range")) {
                     return null;

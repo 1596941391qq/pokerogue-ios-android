@@ -1,7 +1,10 @@
 // Shared co-op client: signaling over SSE + POST, WebRTC helpers, stats reporting.
 // Used by the guest page (this folder) and injected into the game for the host.
 window.Coop = (function () {
-  const ORIGIN = window.COOP_ORIGIN || 'https://192.220.36.155:8790';
+  // The 2P page talks to whatever served it (the online server, or a host's own LAN server); the host is told
+  // through window.COOP_ORIGIN (a LAN room uses the server inside the host app).
+  const served = /^https?:$/.test(location.protocol) && location.pathname.indexOf('/coop/') === 0;
+  const ORIGIN = window.COOP_ORIGIN || (served ? location.origin : 'https://192.220.36.155:8790');
   const API = ORIGIN + '/coop/api';
   const ICE = window.COOP_ICE || [{ urls: 'stun:192.220.36.155:3478' }];
 
@@ -68,6 +71,7 @@ window.Coop = (function () {
     try {
       const r = await fetch(`${API}/ice?room=${sig.room}&id=${sig.id}`);
       const j = await r.json();
+      if (j.lan) return []; // LAN room: no STUN, no relay, the two devices reach each other directly
       return j.iceServers && j.iceServers.length ? j.iceServers : ICE;
     } catch { return ICE; }
   }

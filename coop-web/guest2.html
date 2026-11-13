@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>PokéRogue 合作模式 · 2P</title>
+<style>
+  :root {
+    --bg: #1d1824; --panel: #2a2333; --line: #3d3449; --ink: #f4f1f7; --mute: #a59cb3;
+    --p1: #4aa3ff; --p2: #f5c84c; --ok: #5fd38a;
+    --key: rgba(255, 255, 255, .08); --key-line: rgba(255, 255, 255, .22);
+  }
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; overflow: hidden; }
+  button { font-family: inherit; color: #fff; background: var(--key); border: 2px solid var(--key-line); touch-action: none; }
+  button.on { background: var(--p2); color: #1d1824; border-color: var(--p2); }
+
+  /* ---------- portrait: screen on top, controller below ---------- */
+  #app { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px; padding: max(10px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom)); }
+
+  .top { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .badge { font-weight: 800; padding: 3px 9px; border-radius: 999px; background: var(--p2); color: #1d1824; }
+  .room { color: var(--mute); }
+  .room b { color: var(--ink); letter-spacing: 2px; }
+  .conn { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--mute); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); }
+  .conn.on, .conn.on .dot { color: var(--ok); }
+  .conn.on .dot { background: var(--ok); }
+
+  .screen { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; border: 2px solid var(--line); }
+  .screen.mine { border-color: var(--p2); }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--mute); font-size: 14px; }
+
+  /* whose turn */
+  .turn { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px; background: var(--panel); border: 2px solid var(--line); }
+  .turn .who { font-weight: 800; font-size: 12px; padding: 2px 7px; border-radius: 6px; background: var(--line); color: var(--mute); flex: none; }
+  .turn.p1 .who { background: var(--p1); color: #0d1b2a; }
+  .turn .txt { font-size: 15px; font-weight: 700; }
+  .turn .sub { font-size: 12px; color: var(--mute); margin-left: auto; white-space: nowrap; }
+  .turn.p2 { border-color: var(--p2); background: rgba(245, 200, 76, .12); }
+  .turn.p2 .who { background: var(--p2); color: #1d1824; }
+  .turn.p2 .txt { color: var(--p2); }
+
+  /* a shout (mine or 1P's) flashes over the turn bar */
+  .turn { position: relative; }
+  #shout { display: none; position: absolute; inset: -2px; border-radius: 10px; align-items: center; justify-content: center; gap: 8px; font-size: 16px; font-weight: 800; color: #1d1824; background: var(--p2); z-index: 1; }
+  #shout.p1 { background: var(--p1); }
+  #shout.show { display: flex; animation: shoutIn .18s ease-out; }
+  @keyframes shoutIn { from { transform: scale(.9); opacity: 0; } to { transform: none; opacity: 1; } }
+  /* the four preset lines, behind the 喊话 button */
+  #say { display: none; position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(max(14px, env(safe-area-inset-bottom)) + 44px); z-index: 3; gap: 6px; padding: 8px; border-radius: 12px; background: rgba(42, 35, 51, .97); border: 2px solid var(--p2); grid-template-columns: 1fr 1fr; width: 220px; }
+  #say.open { display: grid; }
+  #say button { padding: 10px 4px; border-radius: 9px; font-size: 14px; font-weight: 700; touch-action: manipulation; }
+  .pill.open { border-color: var(--p2); color: var(--p2); }
+  .pill:disabled { opacity: .4; }
+  .sndBtn { padding: 2px 8px; border-radius: 999px; font-size: 13px; line-height: 1.3; }
+  .sndBtn.live { border-color: var(--ok); }
+  .conn.re, .conn.re .dot { color: var(--p2); } .conn.re .dot { background: var(--p2); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  /* keys that only exist on the current game screen (same rule as the game's own touch controls) */
+  .ctx { display: flex; gap: 6px; }
+  .ctx:empty { display: none; }
+  .ctx button { flex: 1; max-width: 96px; padding: 6px 2px; border-radius: 9px; font-size: 13px; font-weight: 700; line-height: 1.15; }
+  .ctx button i { display: block; font-style: normal; font-size: 10px; font-weight: 500; opacity: .6; }
+
+  /* pick ahead: 2P chooses a move any time in the turn and presses 完成 */
+  .pick { display: none; flex-direction: column; gap: 6px; padding: 8px; border-radius: 10px; background: var(--panel); border: 2px solid var(--p2); }
+  .pick.show { display: flex; }
+  .pick-head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mute); }
+  .pick-head b { color: var(--p2); }
+  .pick-head .state { margin-left: auto; font-weight: 700; color: var(--ok); }
+  .pick-head .fold { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+  .moves { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .moves button, .tgts button { padding: 7px 6px; border-radius: 9px; font-size: 14px; font-weight: 700; text-align: left; }
+  .moves button i { float: right; font-style: normal; font-size: 11px; font-weight: 500; opacity: .6; margin-top: 2px; }
+  .moves button:disabled { opacity: .35; }
+  .tgts { display: flex; gap: 6px; }
+  .tgts button { flex: 1; text-align: center; font-size: 13px; }
+  .tgts .done { flex: 1.2; background: var(--p2); color: #1d1824; border-color: var(--p2); font-size: 15px; font-weight: 800; }
+  .tgts .done:disabled { background: var(--key); color: var(--mute); border-color: var(--key-line); }
+  .moves .sel, .tgts .sel { border-color: var(--p2); color: var(--p2); background: rgba(245, 200, 76, .14); }
+  .pick.folded .moves, .pick.folded .tgts { display: none; }
+  .mate { font-size: 12px; color: var(--mute); display: flex; gap: 6px; align-items: center; }
+  .mate:empty { display: none; }
+  .mate .who1 { font-weight: 800; font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--p1); color: #0d1b2a; }
+  .mate b { color: var(--ink); } .mate.done b { color: var(--p1); }
+
+  /* controller: D-pad left, A/B right, menu in the middle */
+  .pad { flex: 1; display: flex; align-items: center; justify-content: space-between; min-height: 180px; }
+  .dpad { position: relative; width: 156px; height: 156px; flex: none; }
+  .dpad button { position: absolute; width: 54px; height: 54px; border-radius: 12px; font-size: 20px; }
+  .dpad [data-btn=up] { left: 51px; top: 0; } .dpad [data-btn=down] { left: 51px; bottom: 0; }
+  .dpad [data-btn=left] { left: 0; top: 51px; } .dpad [data-btn=right] { right: 0; top: 51px; }
+  .ab { position: relative; width: 150px; height: 140px; flex: none; }
+  .ab button { position: absolute; width: 74px; height: 74px; border-radius: 50%; font-size: 22px; font-weight: 800; }
+  .ab [data-btn=a] { right: 0; top: 0; } .ab [data-btn=b] { left: 0; bottom: 0; }
+  .mid { align-self: flex-end; display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 1; }
+  .mid .pill { white-space: nowrap; }
+  .pill { font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 999px; }
+
+  /* ---------- landscape: screen in the middle, hands on the sides ---------- */
+  @media (orientation: landscape) and (max-height: 600px) {
+    #app { display: grid; gap: 6px 12px; align-items: center; justify-content: center;
+      padding: max(6px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+      grid-template-columns: 1fr auto 1fr; grid-template-rows: auto auto auto auto; align-content: center; }
+    .pad { display: contents; }
+    .top { grid-column: 2; grid-row: 1; font-size: 12px; }
+    .screen { grid-column: 2; grid-row: 2; width: min(calc((100dvh - 128px) * 16 / 9), calc(100vw - 380px)); }
+    .turn { grid-column: 2; grid-row: 3; padding: 5px 10px; }
+    .turn .txt { font-size: 14px; }
+    .ctx { grid-column: 2; grid-row: 4; justify-content: center; }
+    .ctx button { padding: 4px 2px; }
+    .dpad { grid-column: 1; grid-row: 1 / 4; justify-self: center; width: 144px; height: 144px; }
+    .dpad button { width: 50px; height: 50px; }
+    .dpad [data-btn=up], .dpad [data-btn=down] { left: 47px; } .dpad [data-btn=left], .dpad [data-btn=right] { top: 47px; }
+    .mid { grid-column: 1; grid-row: 4; align-self: center; }
+    .ab { grid-column: 3; grid-row: 1 / 5; justify-self: center; width: 140px; height: 130px; }
+    .ab button { width: 68px; height: 68px; }
+    .pick { grid-column: 2; grid-row: 2; align-self: start; z-index: 2; background: rgba(42, 35, 51, .94); }
+    .pick:not(.folded) { align-self: stretch; justify-content: center; }
+    #say { left: max(12px, env(safe-area-inset-left)); transform: none; bottom: calc(max(6px, env(safe-area-inset-bottom)) + 40px); }
+    .mid { flex-direction: row; justify-content: center; gap: 6px; } .mid .pill { padding: 6px 9px; }
+  }
+
+  /* team sheet: both players' Pokémon and the bag */
+  .teamBtn { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .teamBtn.open { border-color: var(--p2); color: var(--p2); }
+  #team { display: none; position: fixed; left: 10px; right: 10px; bottom: max(10px, env(safe-area-inset-bottom)); max-height: 58vh; overflow-y: auto; z-index: 4;
+    padding: 10px; border-radius: 12px; background: rgba(42, 35, 51, .97); border: 2px solid var(--line); box-shadow: 0 -8px 30px rgba(0, 0, 0, .4); }
+  #team.open { display: block; }
+  .mon { padding: 8px 4px; border-bottom: 1px solid var(--line); }
+  .mon:last-of-type { border-bottom: 0; }
+  .mon .row { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .mon .tag { font-size: 11px; font-weight: 800; padding: 1px 6px; border-radius: 5px; background: var(--line); color: var(--mute); }
+  .mon .tag.p1 { background: var(--p1); color: #0d1b2a; } .mon .tag.p2 { background: var(--p2); color: #1d1824; }
+  #team .grp { font-size: 12px; font-weight: 800; color: var(--mute); margin: 10px 2px 4px; }
+  #team .grp:first-child { margin-top: 0; }
+  .mon .lv { color: var(--mute); font-size: 12px; }
+  .mon .st { margin-left: auto; font-size: 12px; font-weight: 700; color: #ff9b7a; }
+  .hpbar { height: 6px; border-radius: 3px; background: var(--line); margin: 6px 0 3px; overflow: hidden; }
+  .hpbar i { display: block; height: 100%; background: var(--ok); }
+  .hpbar i.mid { background: #f2c94c; } .hpbar i.low { background: #e0503a; }
+  .mon .sub2 { display: flex; justify-content: space-between; font-size: 11px; color: var(--mute); }
+  .bag { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; color: var(--mute); line-height: 1.6; }
+  .bag b { color: var(--ink); }
+  @media (orientation: landscape) and (max-height: 600px) {
+    #team { left: 22%; right: 22%; top: 8px; bottom: 8px; max-height: none; }
+  }
+
+  #join { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 20px; text-align: center; background: var(--bg); z-index: 5; }
+  #join h1 { margin: 0; font-size: 22px; }
+  #join p { margin: 0; color: var(--mute); font-size: 14px; line-height: 1.5; }
+  #join input { font-size: 26px; letter-spacing: 6px; text-align: center; width: 220px; padding: 10px; border-radius: 12px; border: 2px solid var(--mute); background: #15111a; color: var(--ink); text-transform: uppercase; -webkit-user-select: text; user-select: text; }
+  #join button { font-size: 18px; font-weight: 800; padding: 12px 40px; border-radius: 12px; border: 0; background: var(--p2); color: #1d1824; }
+  #msg { color: var(--p2); min-height: 1.4em; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="join">
+  <h1>加入合作</h1>
+  <p>输入房主给你的房间号</p>
+  <input id="room" maxlength="8" autocomplete="off" autocapitalize="characters" placeholder="房间号">
+  <button id="go">加入</button>
+  <div id="msg"></div>
+</div>
+<div id="app">
+  <div class="top">
+    <span class="badge">2P 队友</span>
+    <span class="room">房间 <b id="roomName">----</b></span>
+    <span class="conn" id="conn"><span class="dot"></span><span id="connTxt">连接中</span></span>
+    <button class="sndBtn" id="snd" aria-label="声音">🔇</button>
+    <button class="teamBtn" id="teamBtn">队伍</button>
+  </div>
+  <div class="screen" id="screen"><video id="v" playsinline autoplay muted></video><div class="wait" id="wait">等房主的画面…</div></div>
+  <div class="turn" id="turn"><span class="who" id="who">1P</span><span class="txt" id="turnTxt">房主操作中</span><span class="sub" id="turnSub"></span><div id="shout"></div></div>
+  <div class="ctx" id="ctx"></div>
+  <div class="pick" id="pick">
+    <div class="pick-head"><span>给 <b id="pickMon"></b> 选招，选好按完成</span><span class="state" id="pickState"></span><button class="fold" id="fold">收起</button></div>
+    <div class="mate" id="mate"></div>
+    <div class="moves" id="moves"></div>
+    <div class="tgts" id="tgts"></div>
+  </div>
+  <div class="pad">
+    <div class="dpad"><button data-btn="up">▲</button><button data-btn="left">◀</button><button data-btn="right">▶</button><button data-btn="down">▼</button></div>
+    <div class="mid"><button class="pill" data-btn="menu">菜单</button><button class="pill" id="sayBtn">喊话</button></div>
+    <div class="ab"><button data-btn="b">B</button><button data-btn="a">A</button></div>
+  </div>
+</div>
+<div id="team"></div>
+<div id="say"></div>
+<script src="coop.js"></script>
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  let servers = Coop.ICE, pc = null, ice = null, dc = null, sig = null, room = '';
+
+  // Turn state from the host: {turn: 'p1'|'p2'|null, mon, text, sub}.
+  function setTurn(m) {
+    const mine = m.turn === 'p2';
+    $('turn').className = 'turn' + (m.turn ? ' ' + m.turn : '');
+    $('who').textContent = mine ? '2P' : m.turn === 'p1' ? '1P' : '共同';
+    $('turnTxt').textContent = m.text || (mine ? '轮到你了' : '房主操作中');
+    $('turnSub').textContent = m.sub || (m.mon ? '你控制 ' + m.mon : '');
+    $('screen').classList.toggle('mine', mine);
+  }
+  window.PRS_SET_TURN = setTurn;
+
+  // Extra keys per game screen. The host sends the game's UI mode ({ui: 'COMMAND'}); the rules mirror
+  // the game's own touch controls, so only the keys that do something on that screen are shown.
+  const CTX = [
+    { btn: 'stats', name: '能力', key: 'C', on: ['COMMAND', 'FIGHT', 'BALL', 'TARGET_SELECT'] },
+    { btn: 'tera', name: '信息', key: 'V', on: ['COMMAND', 'FIGHT', 'BALL', 'TARGET_SELECT'] },
+    { btn: 'stats', name: '能力', key: 'C', on: ['MODIFIER_SELECT'] },
+    { btn: 'stats', name: '筛选', key: 'C', on: ['STARTER_SELECT', 'POKEDEX', 'POKEDEX_PAGE'] },
+    { btn: 'form', name: '形态', key: 'F', on: ['STARTER_SELECT', 'POKEDEX', 'POKEDEX_PAGE', 'RUN_INFO'] },
+    { btn: 'gender', name: '性别', key: 'G', on: ['STARTER_SELECT', 'POKEDEX_PAGE'] },
+    { btn: 'shiny', name: '闪光', key: 'R', on: ['STARTER_SELECT', 'POKEDEX', 'POKEDEX_PAGE', 'RUN_INFO'] },
+    { btn: 'ability', name: '特性', key: 'E', on: ['STARTER_SELECT', 'POKEDEX_PAGE', 'RUN_INFO'] },
+    { btn: 'nature', name: '性格', key: 'N', on: ['STARTER_SELECT'] },
+    { btn: 'tera', name: '太晶', key: 'V', on: ['STARTER_SELECT', 'POKEDEX', 'POKEDEX_PAGE'] },
+    { btn: 'form', name: '上一页', key: 'F', on: ['SETTINGS*', 'CHALLENGE_SELECT'] },
+    { btn: 'shiny', name: '下一页', key: 'R', on: ['SETTINGS*', 'CHALLENGE_SELECT'] },
+  ];
+  let ui = '';
+  function setUi(mode) {
+    mode = mode || '';
+    if (mode === ui) return;
+    ui = mode;
+    const fits = p => p.endsWith('*') ? mode.startsWith(p.slice(0, -1)) : p === mode;
+    $('ctx').innerHTML = '';
+    CTX.filter(k => k.on.some(fits)).forEach(k => {
+      const b = document.createElement('button');
+      b.dataset.btn = k.btn;
+      b.innerHTML = k.name + '<i>' + k.key + '</i>';
+      bind(b);
+      $('ctx').appendChild(b);
+    });
+  }
+  window.PRS_SET_UI = setUi;
+
+  // Pick ahead. Host sends {pick: {key, mon, moves: [{name, pp, max, ok}], targets: [{name, bi}]}} at the
+  // start of each turn; we send back {choice: {key, move, target}} on 完成; host answers {applied: key}.
+  let pick = null, sel = { move: null, target: null }, sent = null;
+  function showPick(p) {
+    pick = p; sel = { move: null, target: null }; sent = null;
+    $('pick').classList.toggle('show', !!p);
+    if (!p) return;
+    $('pickMon').textContent = p.mon;
+    if (p.targets.length === 1) sel.target = p.targets[0].bi;
+    drawPick();
+  }
+  function drawPick() {
+    const p = pick;
+    $('moves').innerHTML = '';
+    p.moves.forEach((m, i) => {
+      const b = document.createElement('button');
+      b.innerHTML = m.name + '<i>' + m.pp + '/' + m.max + '</i>';
+      b.disabled = !m.ok;
+      b.classList.toggle('sel', sel.move === i);
+      b.onclick = () => { sel.move = i; intent(); drawPick(); };
+      $('moves').appendChild(b);
+    });
+    $('tgts').innerHTML = '';
+    if (p.targets.length > 1) p.targets.forEach(t => {
+      const b = document.createElement('button');
+      b.textContent = '打 ' + t.name;
+      b.classList.toggle('sel', sel.target === t.bi);
+      b.onclick = () => { sel.target = t.bi; intent(); drawPick(); };
+      $('tgts').appendChild(b);
+    });
+    const done = document.createElement('button');
+    done.className = 'done';
+    const same = sent && sent.move === sel.move && sent.target === sel.target;
+    done.textContent = same ? '已完成' : '完成';
+    done.disabled = sel.move === null || (p.targets.length > 1 && sel.target === null) || same;
+    done.onclick = () => {
+      sent = { key: p.key, move: sel.move, target: sel.target };
+      send({ choice: sent });
+      if (navigator.vibrate) navigator.vibrate(15);
+      drawPick();
+    };
+    $('tgts').appendChild(done);
+    $('pickState').textContent = same ? '已选好 ✓' : '';
+  }
+  // what I'm leaning towards, so 1P sees it in the bubble over my Pokémon before I press 完成
+  function intent() { if (pick) send({ intent: { key: pick.key, move: sel.move, target: sel.target } }); }
+  // what 1P is choosing: {mon, state, text}
+  function setMate(m) {
+    const el = $('mate');
+    el.className = 'mate' + (m && m.state === 'done' ? ' done' : '');
+    el.innerHTML = m ? '<span class="who1">1P</span>' + esc(m.mon) + '：<b>' + esc(m.text) + (m.state === 'done' ? ' ✓' : '') + '</b>' : '';
+  }
+  function applied(m) {
+    if (!pick || m.applied !== pick.key) return;
+    if (m.failed) { $('pickState').textContent = '没选上，请用方向键自己选'; sent = null; return; }
+    showPick(null);
+  }
+  // Team sheet. Host sends {party: {mons: [{name, lv, hp, max, st, who: '1P'|'2P', field, items}], bag: [..], money}}.
+  // Each player has their own Pokémon: mine (2P) first, then my teammate's.
+  let party = null;
+  const esc = t => String(t).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  function drawTeam() {
+    if (!party) { $('team').innerHTML = '<div class="bag">等房主的数据…</div>'; return; }
+    const groups = [['2P', '我的队伍'], ['1P', '队友 1P 的队伍']].map(([w, t]) => [t, party.mons.filter(m => m.who === w)])
+      .concat([['还没分', party.mons.filter(m => m.who !== '1P' && m.who !== '2P')]]).filter(g => g[1].length);
+    $('team').innerHTML = groups.map(([title, mons]) => '<div class="grp">' + title + '</div>' + mons.map(drawMon).join('')).join('') +
+      (party.purse ? '<div class="bag"><b>我的钱</b> ₽' + (party.purse.money.p2 || 0).toLocaleString() + '　<b>我的球</b> ' + balls(party.purse.balls.p2) +
+        '<br><b>队友的钱</b> ₽' + (party.purse.money.p1 || 0).toLocaleString() + '　<b>队友的球</b> ' + balls(party.purse.balls.p1) + '</div>' : '') +
+      '<div class="bag"><b>全队道具</b>（两人共用） ' + (party.bag.length ? esc(party.bag.join('、')) : '空') +
+      (party.purse ? '' : '　<b>钱</b> ₽' + (party.money || 0).toLocaleString()) +
+      (party.hp ? '<br><b>敌人血量</b> ×' + party.hp + '（房主设置）' : '') + (party.cap ? '　每人最多 ' + party.cap + ' 只' : '') + '</div>';
+  }
+  const BALLS = ['精灵球', '超级球', '高级球', '肉鸽球', '大师球'];
+  const balls = b => { const l = BALLS.map((n, i) => [n, (b || {})[i] || 0]).filter(x => x[1]).map(x => x[0] + '×' + x[1]); return l.length ? l.join('、') : '没有'; };
+  function drawMon(m) {
+      const r = m.max ? m.hp / m.max : 0;
+      return '<div class="mon"><div class="row">' + (m.field ? '<span class="tag p' + (m.who || ' ')[0] + '">场上</span>' : '<span class="tag">后备</span>') +
+        '<b>' + esc(m.name) + '</b><span class="lv">Lv.' + m.lv + '</span><span class="st">' + esc(m.st) + '</span></div>' +
+        '<div class="hpbar"><i class="' + (r <= .25 ? 'low' : r <= .5 ? 'mid' : '') + '" style="width:' + Math.round(r * 100) + '%"></i></div>' +
+        '<div class="sub2"><span>HP ' + m.hp + '/' + m.max + '</span><span>' + (m.items.length ? '携带 ' + esc(m.items.join('、')) : '没带道具') + '</span></div></div>';
+  }
+  $('teamBtn').onclick = () => { const o = $('team').classList.toggle('open'); $('teamBtn').classList.toggle('open', o); if (o) drawTeam(); };
+  $('team').onclick = () => { $('team').classList.remove('open'); $('teamBtn').classList.remove('open'); };
+  function setParty(p) { party = p; if ($('team').classList.contains('open')) drawTeam(); }
+
+  // Shouts: four preset lines behind one button. We send {say: n}; the host draws it over my Pokémon and
+  // answers {said: {who, n, text}} (also for 1P's own shouts), which flashes over the turn bar.
+  const SAY = ['集火这只', '等我一下', '换你来', '好的'];
+  let sayAt = 0, shoutTimer = 0;
+  function sayOpen(o) { $('say').classList.toggle('open', o); $('sayBtn').classList.toggle('open', o); }
+  SAY.forEach((t, n) => {
+    const b = document.createElement('button');
+    b.textContent = t;
+    b.onclick = () => {
+      sayOpen(false);
+      if (Date.now() - sayAt < 1500) return; // one per 1.5 s (the host enforces it too)
+      sayAt = Date.now();
+      send({ say: n });
+      if (navigator.vibrate) navigator.vibrate(10);
+      $('sayBtn').disabled = true; setTimeout(() => { $('sayBtn').disabled = false; }, 1500);
+    };
+    $('say').appendChild(b);
+  });
+  $('sayBtn').onclick = () => sayOpen(!$('say').classList.contains('open'));
+  function said(m) {
+    const el = $('shout');
+    el.className = 'show ' + (m.who === 'p1' ? 'p1' : 'p2');
+    el.textContent = (m.who === 'p1' ? '1P：' : '你：') + (m.text || SAY[m.n] || '');
+    if (m.who === 'p1' && navigator.vibrate) navigator.vibrate([20, 40, 20]);
+    clearTimeout(shoutTimer);
+    shoutTimer = setTimeout(() => { el.className = ''; }, 2000);
+  }
+
+  // Game sound. The video starts muted (autoplay rule); 🔇/🔊 unmutes on a tap and the choice is remembered.
+  // A remembered "on" still needs one touch after the page loads, so the first touch anywhere turns it on.
+  const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+  let wantSound = store.get('coopSound') === '1';
+  function applySound() {
+    const v = $('v');
+    v.muted = !wantSound;
+    if (v.srcObject) v.play().catch(() => { v.muted = true; v.play().catch(() => {}); showSound(); });
+    showSound();
+  }
+  function showSound() { const on = wantSound && !$('v').muted; $('snd').textContent = on ? '🔊' : '🔇'; $('snd').classList.toggle('live', on); }
+  $('snd').onclick = () => { wantSound = $('v').muted || !wantSound; store.set('coopSound', wantSound ? '1' : '0'); applySound(); };
+  addEventListener('pointerdown', e => { if (wantSound && $('v').muted && e.target !== $('snd')) applySound(); }, true);
+  showSound();
+
+  $('fold').onclick = () => { const f = $('pick').classList.toggle('folded'); $('fold').textContent = f ? '展开' : '收起'; };
+
+  // ---- buttons ----
+  // A press is a tap. A new host (hv >= 2) lets the key up by itself, so the press goes out at once and a
+  // held button sends a press every REPEAT_MS after HOLD_MS. An older host keeps the key down until our
+  // release arrives, and a release that is late on the network makes the game repeat the key ("one press
+  // jumps five or six"): for it a short press is sent as down + up together when the finger lifts (or after
+  // HOLD_MS, from when it is a real hold and the game's own repeat takes over).
+  let hostV = 1;
+  const HOLD_MS = 380, REPEAT_MS = 110, OLD_HOLD_MS = 160;
+  const keys = {}; // btn -> { hold: timer, rep: timer, sent: the old host has our down }
+  function keyDown(btn) {
+    if (keys[btn]) return;
+    const k = keys[btn] = { sent: false };
+    if (hostV >= 2) {
+      send({ btn, down: true });
+      k.hold = setTimeout(() => { k.rep = setInterval(() => send({ btn, down: true }), REPEAT_MS); }, HOLD_MS);
+    } else {
+      k.hold = setTimeout(() => { k.hold = null; k.sent = true; send({ btn, down: true }); }, OLD_HOLD_MS);
+    }
+  }
+  function keyUp(btn) {
+    const k = keys[btn];
+    if (!k) return;
+    delete keys[btn];
+    clearTimeout(k.hold); clearInterval(k.rep);
+    if (hostV < 2 && !k.sent) send({ btn, down: true }); // a short press on an old host: down and up together
+    send({ btn, down: false });
+  }
+  addEventListener('blur', () => Object.keys(keys).forEach(keyUp));
+  function bind(b) {
+    const btn = b.dataset.btn;
+    const down = e => { e.preventDefault(); b.classList.add('on'); keyDown(btn); if (navigator.vibrate) navigator.vibrate(8); };
+    const up = e => { e.preventDefault(); if (!b.classList.contains('on')) return; b.classList.remove('on'); keyUp(btn); };
+    b.addEventListener('pointerdown', down); b.addEventListener('pointerup', up);
+    b.addEventListener('pointercancel', up); b.addEventListener('pointerleave', up);
+  }
+  function buttons() {
+    document.querySelectorAll('.pad [data-btn]').forEach(bind);
+    // keyboard, for playing 2P in a computer browser (same letters as the game)
+    const map = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', z: 'a', ' ': 'a', Enter: 'a', x: 'b', Backspace: 'b', Escape: 'menu', m: 'menu',
+      c: 'stats', Shift: 'stats', r: 'shiny', f: 'form', g: 'gender', e: 'ability', n: 'nature', v: 'tera' };
+    addEventListener('keydown', e => { const b = map[e.key]; if (b) { e.preventDefault(); if (!e.repeat) keyDown(b); } });
+    addEventListener('keyup', e => { const b = map[e.key]; if (b) { e.preventDefault(); keyUp(b); } });
+  }
+  function send(m) { if (dc && dc.readyState === 'open') dc.send(JSON.stringify(m)); }
+  function conn(on, txt) { $('conn').classList.toggle('on', on); $('connTxt').textContent = txt; }
+
+  async function onOffer(sdp, n) {
+    if (pc) pc.close();
+    pc = new RTCPeerConnection({ iceServers: servers });
+    const q = ice = Coop.iceQueue(pc);
+    pc.onicecandidate = e => { if (e.candidate) sig.send({ type: 'ice', candidate: e.candidate.toJSON() }); };
+    const mine = pc;
+    pc.ontrack = e => {
+      // video and the game's audio arrive as two tracks of one stream
+      const v = $('v'), st = e.streams[0] || new MediaStream([e.track]);
+      // show frames as they come: no smoothing buffer (a button press is seen sooner)
+      try { e.receiver.playoutDelayHint = 0; e.receiver.jitterBufferTarget = 0; } catch {}
+      if (v.srcObject !== st) v.srcObject = st;
+      v.play().catch(() => {});
+      if (e.track.kind === 'video') $('wait').style.display = 'none';
+    };
+    pc.ondatachannel = e => {
+      dc = e.channel; hostV = 1; // until this host says otherwise
+      dc.onopen = () => { if (mine === pc) linkUp(); };
+      dc.onclose = () => { if (mine === pc) linkDown(); };
+      dc.onmessage = ev => { try { const m = JSON.parse(ev.data); if ('said' in m) said(m.said); if ('turn' in m) setTurn(m); if ('hv' in m) hostV = m.hv; if ('ui' in m) setUi(m.ui); if ('pick' in m) showPick(m.pick); if ('party' in m) setParty(m.party); if ('mate' in m) setMate(m.mate); if ('applied' in m) applied(m); } catch {} };
+    };
+    pc.onconnectionstatechange = () => {
+      if (mine !== pc) return;
+      const s = pc.connectionState;
+      if (s === 'connected') linkUp();
+      else if (s === 'failed' || s === 'disconnected' || s === 'closed') linkDown();
+    };
+    // a newer offer may arrive during any await: then this one is dropped (mine !== pc)
+    await mine.setRemoteDescription({ type: 'offer', sdp });
+    if (mine !== pc) return;
+    q.flush();
+    const answer = await mine.createAnswer();
+    if (mine !== pc) return;
+    await mine.setLocalDescription(answer);
+    if (mine !== pc) return;
+    sig.send({ type: 'answer', sdp: answer.sdp, n }); // n tells the host which offer this answers
+  }
+
+  // ---- staying connected: after a drop keep asking the host for a new offer until the link is back ----
+  let joined = false, hostGone = false, downSince = 0, lastTry = 0, rejoining = false, wasDown = false;
+  const linkOk = () => !!(pc && pc.connectionState === 'connected' && dc && dc.readyState === 'open');
+  function linkUp() {
+    if (!linkOk()) return;
+    if (wasDown) { wasDown = false; send({ sync: 1 }); } // we cleared the panel in linkDown: ask for the state again
+    downSince = 0; hostGone = false;
+    conn(true, '已连接'); $('conn').classList.remove('re');
+    if ($('v').srcObject) $('wait').style.display = 'none';
+    applySound();
+  }
+  function linkDown() {
+    if (!downSince) downSince = Date.now();
+    wasDown = true;
+    showPick(null); // the host rebuilds this turn's panel when we are back
+    setTurn({ turn: null, text: hostGone ? '房主离开了' : '重连中…', sub: hostGone ? '' : '1P 先替你操作' });
+    conn(false, hostGone ? '房主离开了，等他回来…' : '重连中…'); $('conn').classList.add('re');
+    $('wait').textContent = hostGone ? '房主离开了，等他回来…' : '重连中…'; $('wait').style.display = 'flex';
+    $('wait').style.background = 'rgba(0,0,0,.55)';
+  }
+  async function rejoin() { // the signaling stream itself died: open a new one (same room)
+    if (rejoining) return;
+    rejoining = true;
+    try {
+      if (sig) sig.close();
+      sig = newSignal();
+      await sig.open();
+      servers = await Coop.iceServersFor(sig);
+      sig.send({ type: 'ready' });
+    } catch { /* host or server not there yet: the watchdog tries again */ }
+    rejoining = false;
+  }
+  function newSignal() {
+    return new Coop.Signal(room, 'guest')
+      .on('message', m => { if (m.type === 'offer') { hostGone = false; onOffer(m.sdp, m.n).catch(() => {}); } else if (m.type === 'ice') ice && ice.add(m.candidate); })
+      .on('peer-joined', () => { hostGone = false; })
+      .on('peer-left', () => { hostGone = true; linkDown(); });
+  }
+  setInterval(() => {
+    if (!joined || linkOk()) return;
+    const now = Date.now();
+    if (!downSince) downSince = now;
+    // give a fresh offer 8 s to connect, a hiccup 3 s to heal by itself, then ask again every 5 s
+    const settling = pc && ['new', 'connecting'].includes(pc.connectionState) && now - lastTry < 8000;
+    if (settling || now - downSince < 3000 || now - lastTry < 5000) return;
+    lastTry = now;
+    linkDown();
+    if (!sig || !sig.es || sig.es.readyState === 2) rejoin();
+    else sig.send({ type: 'ready' }).catch(() => rejoin());
+  }, 1000);
+  addEventListener('online', () => { lastTry = 0; });
+  window.PRS_LINK = { ok: linkOk, pc: () => pc, drop: () => { if (pc) pc.close(); linkDown(); } }; // for tests
+
+  async function join(code) {
+    room = code.trim().toUpperCase();
+    if (!/^[A-Z0-9]{4,8}$/.test(room)) { $('msg').textContent = '房间号是 4–8 位字母或数字'; return; }
+    $('msg').textContent = '正在连接房间…';
+    sig = newSignal();
+    try { await sig.open(); servers = await Coop.iceServersFor(sig); }
+    catch (e) { $('msg').textContent = '进不了房间：房间号不对，或者房主还没开房'; return; }
+    $('join').style.display = 'none';
+    $('roomName').textContent = room;
+    buttons();
+    joined = true; lastTry = Date.now();
+    sig.send({ type: 'ready' });
+  }
+  $('go').onclick = () => join($('room').value);
+  if (qs.get('room')) { $('room').value = qs.get('room').toUpperCase(); if (qs.get('auto') === '1') join(qs.get('room')); }
+})();
+</script>
+</body>
+</html>

@@ -46,6 +46,10 @@ public class CanvasGameServer extends NanoHTTPD {
         // 将请求的 URI 转换为 assets 文件夹中的路径
         String path = uri.contains("?") ? uri.split("\\?")[0] : uri;
 
+        // LAN co-op room hosted on this phone: signaling is answered here, everything else is a bundled file
+        Response coop = CoopLan.handle(session, path, getListeningPort());
+        if (coop != null) return coop;
+
         // 转换为 assets 文件夹中的相对路径
         String assetPath = "web" + (path.startsWith("/") ? "" : "/") + path;
 

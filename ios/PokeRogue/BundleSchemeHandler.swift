@@ -51,6 +51,14 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         var path = url.path // already percent-decoded ("Comet Punch.mp3")
+        if path == "/coop/api/lan" {
+            // The game is about to open a LAN co-op room: start the local server (LanCoopServer) and tell the
+            // page where it is and on which addresses a friend can reach it.
+            guard let port = LanCoopServer.shared.ensureStarted() else { return reply(url, status: 503, body: Data()) }
+            let info: [String: Any] = ["origin": "http://127.0.0.1:\(port)", "port": Int(port), "addresses": LanCoopServer.lanAddresses()]
+            let body = (try? JSONSerialization.data(withJSONObject: info)) ?? Data("{}".utf8)
+            return reply(url, status: 200, body: body, mime: "application/json; charset=utf-8")
+        }
         if path.isEmpty || path.hasSuffix("/") { path += "index.html" }
         let file = root.appendingPathComponent(String(path.drop(while: { $0 == "/" }))).standardizedFileURL
 
