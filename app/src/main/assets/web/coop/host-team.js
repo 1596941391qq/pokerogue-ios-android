@@ -114,6 +114,36 @@ window.CoopTeam = (function () {
       return start.apply(this, arguments);
     };
   }
+  // A trainer with nobody left to send. Co-op makes every trainer battle a double battle, also against one
+  // trainer alone (the game itself only does doubles against trainer pairs, whose Pokémon are split between
+  // the two). For such a trainer the game queues one "send the next one" phase per fainted Pokémon as long as
+  // anything is left in reserve: two knocked out in one turn with one in reserve gives two phases. The first
+  // sends the last Pokémon; the second finds nobody, the game then reads the missing Pokémon inside a timer
+  // (switchAndSummon: "Cannot read properties of undefined (reading 'resetSummonData')") and the phase never
+  // ends: the battle hangs on "XX派出了YY！". Such a phase is ended here before it starts; that field slot
+  // stays empty, as it does when a Pokémon faints with no reserve at all.
+  function patchSwitchSummon(proto) {
+    if (proto.__coopNone) return;
+    proto.__coopNone = true;
+    let base = proto; // the root Phase class: its end() only moves on to the next phase
+    for (let p = Object.getPrototypeOf(base); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) base = p;
+    const start = proto.start;
+    proto.start = function () {
+      let none = false;
+      try {
+        if (!this.player) { // the same lookup the game is about to do (SwitchSummonPhase.preSummon)
+          const b = scene().currentBattle, l = b.enemyParty, tr = b.trainer;
+          if (this.slotIndex === -1) none = !tr || !tr.getPartyMemberMatchupScores(this.fieldIndex ? 2 : 1).length;
+          else none = !l[this.slotIndex];
+        }
+      } catch (e) { log('send-out check error', String(e)); }
+      if (none) {
+        log('enemy slot ' + this.fieldIndex + ': nobody left to send out, phase skipped');
+        return base.end.call(this);
+      }
+      return start.apply(this, arguments);
+    };
+  }
   const notYours = o => '这只是 ' + label(o) + ' 的宝可梦，选你自己的';
   // who threw the ball that caught something this wave (the party-full release question is theirs)
   function catcher() {
@@ -383,6 +413,8 @@ window.CoopTeam = (function () {
       if (name === 'SelectModifierPhase') {
         try { patchRewardPhase(Object.getPrototypeOf(ph)); tagReward(ph, args); } catch (e) { log('reward hook error', String(e)); }
       }
+      // every replacement after a faint is made here (pushNew goes through create), so the first one patches the class
+      if (name === 'SwitchSummonPhase') { try { patchSwitchSummon(Object.getPrototypeOf(ph)); } catch (e) { log('send-out hook error', String(e)); } }
       return ph;
     };
     // the game starts a turn with `new TurnInitPhase` (not through create), so patch its class right away

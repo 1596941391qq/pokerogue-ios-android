@@ -100,28 +100,87 @@
   .mid .pill { white-space: nowrap; }
   .pill { font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 999px; }
 
-  /* ---------- landscape: screen in the middle, hands on the sides ---------- */
+  /* ---------- landscape phone: the picture fills the height, keys float over its two sides (like a handheld) ----------
+     Sizes come from #app's own box (the part of the page the browser really shows) and are capped by 100dvh; nothing
+     is sized from 100vh alone, which is taller than the visible page while a browser shows its address bar or toolbar. */
+  .padBtn { display: none; }
   @media (orientation: landscape) and (max-height: 600px) {
-    #app { display: grid; gap: 6px 12px; align-items: center; justify-content: center;
-      padding: max(6px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
-      grid-template-columns: 1fr auto 1fr; grid-template-rows: auto auto auto auto; align-content: center; }
+    :root {
+      --pl: max(8px, env(safe-area-inset-left, 0px)); --pr: max(8px, env(safe-area-inset-right, 0px));
+      --pt: max(4px, env(safe-area-inset-top, 0px)); --pb: max(4px, env(safe-area-inset-bottom, 0px));
+    }
+    #app { display: grid; gap: 0; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto minmax(0, 1fr);
+      padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+      max-height: 100vh; max-height: 100dvh; }
+
+    /* the picture: as tall as the page, 16:9, in the middle; everything else sits on top of it or beside it.
+       On a page that is not much wider than 16:9 it stops 66px short of each side, so the corner buttons stay off it. */
+    .screen { grid-column: 1; grid-row: 1 / -1; justify-self: center; align-self: center; height: 100%; width: auto; border-radius: 6px;
+      max-height: calc((100vw - 132px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) * 9 / 16); }
+
+    /* whose turn: a thin pill on the top edge of the picture */
+    .turn { grid-column: 1; grid-row: 1; justify-self: center; z-index: 2; margin-top: 4px; min-width: 150px; max-width: calc(100% - 300px);
+      gap: 6px; padding: 2px 10px 2px 4px; border-width: 1px; border-radius: 999px; background: rgba(29, 24, 36, .82); }
+    .turn.p2 { background: rgba(29, 24, 36, .88); }
+    .turn .who { font-size: 11px; padding: 1px 6px; border-radius: 999px; }
+    .turn .txt { font-size: 13px; white-space: nowrap; }
+    .turn .sub { font-size: 11px; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; }
+    #shout { inset: -1px; border-radius: 999px; font-size: 13px; white-space: nowrap; }
+
+    /* extra keys of the current game screen: a row under the pill, top middle (clear of the text box at the bottom) */
+    .ctx { grid-column: 1; grid-row: 2; justify-self: center; z-index: 2; margin-top: 4px; flex-wrap: wrap; justify-content: center; max-width: calc(100% - 300px); }
+    .ctx button { flex: none; min-width: 50px; min-height: 42px; max-width: none; padding: 3px 8px; }
+
+    /* pick ahead: a panel over the middle of the picture, between the two hands */
+    .pick { grid-column: 1; grid-row: 3; justify-self: center; align-self: start; z-index: 2; margin-top: 4px; width: min(440px, calc(100% - 300px)); padding: 6px 8px; background: rgba(42, 35, 51, .94); }
+
+    /* keys: see-through so the picture shows under them, but readable on a bright scene */
+    .pad button:not(.on):not(.open), .ctx button:not(.on), .sndBtn, .teamBtn:not(.open), .padBtn { background: rgba(52, 44, 64, .5); border-color: rgba(255, 255, 255, .42); text-shadow: 0 1px 2px rgba(0, 0, 0, .7); }
+
+    /* left hand: status in the corner, D-pad in the middle, 菜单 / 喊话 at the bottom */
+    .top { display: contents; }
+    .badge, .room, .conn { position: absolute; left: var(--pl); z-index: 1; font-size: 11px; line-height: 15px; white-space: nowrap; }
+    .badge { top: var(--pt); padding: 1px 7px; }
+    .room { top: calc(var(--pt) + 20px); font-size: 0; line-height: 0; padding: 0 6px; border-radius: 999px; background: rgba(29, 24, 36, .7); }
+    .room b { display: block; font-size: 11px; line-height: 15px; }
+    .conn { top: calc(var(--pt) + 37px); margin-left: 0; gap: 4px; padding: 0 6px; border-radius: 999px; background: rgba(29, 24, 36, .7); }
     .pad { display: contents; }
-    .top { grid-column: 2; grid-row: 1; font-size: 12px; }
-    .screen { grid-column: 2; grid-row: 2; width: min(calc((100dvh - 128px) * 16 / 9), calc(100vw - 380px)); }
-    .turn { grid-column: 2; grid-row: 3; padding: 5px 10px; }
-    .turn .txt { font-size: 14px; }
-    .ctx { grid-column: 2; grid-row: 4; justify-content: center; }
-    .ctx button { padding: 4px 2px; }
-    .dpad { grid-column: 1; grid-row: 1 / 4; justify-self: center; width: 144px; height: 144px; }
-    .dpad button { width: 50px; height: 50px; }
-    .dpad [data-btn=up], .dpad [data-btn=down] { left: 47px; } .dpad [data-btn=left], .dpad [data-btn=right] { top: 47px; }
-    .mid { grid-column: 1; grid-row: 4; align-self: center; }
-    .ab { grid-column: 3; grid-row: 1 / 5; justify-self: center; width: 140px; height: 130px; }
-    .ab button { width: 68px; height: 68px; }
-    .pick { grid-column: 2; grid-row: 2; align-self: start; z-index: 2; background: rgba(42, 35, 51, .94); }
-    .pick:not(.folded) { align-self: stretch; justify-content: center; }
-    #say { left: max(12px, env(safe-area-inset-left)); transform: none; bottom: calc(max(6px, env(safe-area-inset-bottom)) + 40px); }
-    .mid { flex-direction: row; justify-content: center; gap: 6px; } .mid .pill { padding: 6px 9px; }
+    .dpad { position: absolute; left: var(--pl); top: 46%; transform: translateY(-50%); width: 138px; height: 138px; z-index: 1; }
+    .dpad button { width: 46px; height: 46px; font-size: 18px; }
+    .dpad [data-btn=up], .dpad [data-btn=down] { left: 46px; } .dpad [data-btn=left], .dpad [data-btn=right] { top: 46px; }
+    .mid { position: absolute; left: var(--pl); bottom: var(--pb); z-index: 1; flex-direction: column; align-items: stretch; gap: 4px; }
+    .mid .pill { min-width: 58px; min-height: 44px; padding: 0 10px; border-radius: 10px; }
+
+    /* right hand: sound and team in the corner, A / B in the middle, the hide-keys switch at the bottom */
+    .sndBtn, .teamBtn, .padBtn { position: absolute; right: var(--pr); z-index: 1; min-width: 58px; height: 44px; padding: 0 8px; border-radius: 10px; }
+    .sndBtn { top: var(--pt); font-size: 17px; }
+    .teamBtn { top: calc(var(--pt) + 48px); }
+    .ab { position: absolute; right: var(--pr); top: 52%; transform: translateY(-50%); width: 88px; height: 126px; z-index: 1; }
+    .ab button { width: 62px; height: 62px; font-size: 20px; }
+    .padBtn { display: block; bottom: var(--pb); z-index: 3; font-size: 11px; font-weight: 700; touch-action: manipulation; }
+
+    /* keys hidden: only the picture and the switch stay (a shout from 1P still flashes at the top) */
+    #app.nopad .top, #app.nopad .pad, #app.nopad .ctx, #app.nopad .pick { display: none; }
+    #app.nopad .turn { visibility: hidden; }
+    #app.nopad #shout.show { visibility: visible; }
+    #app.nopad .padBtn { opacity: .8; }
+
+    /* the four shout lines: one row beside the 喊话 button */
+    #say { left: calc(var(--pl) + 66px); transform: none; bottom: var(--pb); width: auto; grid-template-columns: repeat(4, auto); padding: 6px; }
+    #say button { padding: 0 10px; min-height: 44px; }
+  }
+  /* very little height (toolbars above and below): drop the 2P badge and tighten both corners so nothing meets the D-pad or A / B */
+  @media (orientation: landscape) and (max-height: 309px) {
+    .badge { display: none; }
+    .room { top: var(--pt); } .conn { top: calc(var(--pt) + 17px); }
+    .dpad { top: calc(var(--pt) + 36px); transform: none; width: 132px; height: 132px; }
+    .dpad button { width: 44px; height: 44px; }
+    .dpad [data-btn=up], .dpad [data-btn=down] { left: 44px; } .dpad [data-btn=left], .dpad [data-btn=right] { top: 44px; }
+    .sndBtn, .teamBtn { height: 40px; } .teamBtn { top: calc(var(--pt) + 42px); }
+    .ab { top: 54%; }
+  }
+  @media (orientation: landscape) and (max-height: 269px) {
+    .mid { flex-direction: row; }
   }
 
   /* team sheet: both players' Pokémon and the bag */
@@ -187,6 +246,7 @@
     <div class="mid"><button class="pill" data-btn="menu">菜单</button><button class="pill" id="sayBtn">喊话</button></div>
     <div class="ab"><button data-btn="b">B</button><button data-btn="a">A</button></div>
   </div>
+  <button class="padBtn" id="padBtn">收起按键</button>
 </div>
 <div id="team"></div>
 <div id="say"></div>
@@ -414,6 +474,23 @@
     addEventListener('keydown', e => { const b = map[e.key]; if (b) { e.preventDefault(); if (!e.repeat) keyDown(b); } });
     addEventListener('keyup', e => { const b = map[e.key]; if (b) { e.preventDefault(); keyUp(b); } });
   }
+  // Landscape only (the button and the .nopad rules exist only there): hide every key and bar so just the picture
+  // is left, for watching or for playing with a keyboard. Remembered on this phone.
+  let padHidden = store.get('coopPadHidden') === '1';
+  function showPad() { $('app').classList.toggle('nopad', padHidden); $('padBtn').textContent = padHidden ? '展开按键' : '收起按键'; }
+  $('padBtn').onclick = () => {
+    padHidden = !padHidden;
+    store.set('coopPadHidden', padHidden ? '1' : '0');
+    if (padHidden) { // let go of anything held and close the pop-ups that would be left without their buttons
+      Object.keys(keys).forEach(keyUp);
+      document.querySelectorAll('#app button.on[data-btn]').forEach(b => b.classList.remove('on'));
+      sayOpen(false);
+      $('team').classList.remove('open'); $('teamBtn').classList.remove('open');
+    }
+    showPad();
+  };
+  showPad();
+
   function send(m) { if (dc && dc.readyState === 'open') dc.send(JSON.stringify(m)); }
   function conn(on, txt) { $('conn').classList.toggle('on', on); $('connTxt').textContent = txt; }
 
