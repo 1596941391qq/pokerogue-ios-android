@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var ORIGIN = 'https://192.220.36.155:8790'; // signaling server + join page
-  var SCRIPTS = ['coop.js', 'host.js', 'host-team.js', 'host-game.js', 'host-overlay.js']; // order matters
+  var SCRIPTS = ['coop.js', 'host.js', 'host-team.js', 'host-game.js', 'host-overlay.js', 'host-mods.js', 'mods-bundle.js']; // order matters
   var CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I: the code is read aloud and typed
   var IOS = location.protocol === 'pokerogue:'; // the iOS app serves the game under its own scheme
   var room = null, status = ['', ''], panel = null, pill = null;
@@ -95,6 +95,19 @@
     s.onerror = function () { setStatus('开房间失败：缺少文件 ' + SCRIPTS[i], 'bad'); };
     document.head.appendChild(s);
   }
+  // the list of mods and their switches (coop/host-mods.js); also works before a room is open
+  function openMods() {
+    closePanel();
+    var files = window.CoopMods ? [] : ['host-mods.js', 'mods-bundle.js'];
+    (function next(i) {
+      if (i >= files.length) { try { window.CoopMods && window.CoopMods.openPanel(); } catch (e) {} return; }
+      var s = document.createElement('script');
+      s.src = './coop/' + files[i];
+      s.onload = function () { next(i + 1); };
+      document.head.appendChild(s);
+    })(0);
+  }
+  var modsRow = function () { return el('div', { class: 'row' }, [el('button', { class: 'sub', text: 'Mod（民间创意工坊）', onclick: openMods })]); };
   var opening = false;
   function openRoom(useLan) {
     if (room || opening) return;
@@ -185,7 +198,8 @@
         el('div', { class: 'row' }, [input, el('button', { class: 'sub', text: '加入房间', onclick: function () { join(input.value); } })]),
         el('p', { text: '敌人血量（两个人打，敌人比单人更耐打；改了从下一场战斗起生效）' }),
         hpRow(),
-        el('p', { text: '加入朋友开的房间会跳到浏览器里玩（朋友开的是局域网房间时，直接扫他的二维码）。合作规则（双打、各自 10 点和 3 个队伍位置、钱和精灵球各一份、5 选 2）只对开房间之后新开的一局生效。普通房间两边都要联网。' }),
+        modsRow(),
+        el('p', { text: '加入朋友开的房间会跳到浏览器里玩（朋友开的是局域网房间时，直接扫他的二维码）。合作规则（双打、各自 10 点、每人最多 6 只、钱和精灵球各一份、5 选 2）只对开房间之后新开的一局生效。普通房间两边都要联网。' }),
       ]);
     } else {
       var qr = el('canvas', { id: 'prsCoopQr' }), copy = el('button', { class: 'sub', text: '复制链接' });
@@ -218,6 +232,7 @@
       kids = kids.concat([
         el('p', { text: '敌人血量（改了从下一场战斗起生效）' }),
         hpRow(),
+        modsRow(),
         el('div', { class: 'row' }, [el('button', { class: 'bad', text: '关闭房间', onclick: closeRoom })]),
       ]);
       card = el('div', { id: 'prsCoopCard' }, kids);

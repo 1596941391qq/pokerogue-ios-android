@@ -18,7 +18,11 @@
   function ready() {
     const s = window.PRS_SCENE;
     if (!s || !s.add || !window.Phaser || !window.CoopGame) return false;
-    if (s !== scene || !layer || !layer.scene) {
+    // Back at the title the game empties its display list without destroying what was in it: our containers
+    // keep their .scene but are no longer drawn, so also check that the layer is still on the list.
+    if (s !== scene || !layer || !layer.scene || s.children.getIndex(layer) < 0) {
+      [layer, fx, bar].forEach(c => { try { if (c && c.scene) c.destroy(); } catch {} });
+      lastSig = '';
       scene = s;
       layer = s.add.container(0, 0).setScale(6).setDepth(1e6).setName('coop-overlay');
       fx = s.add.container(0, 0).setScale(6).setDepth(1e6 + 1).setName('coop-fx');
@@ -96,6 +100,7 @@
   const BAR_POS = window.CoopBarPos = {
     default: [160, 0, 'c'],
     STARTER_SELECT: [2, 172, 'l'], // under the 'whose pick' tag; the filter bar runs along the top
+    PARTY: [2, 0, 'l'], // the top right corner is host-team.js's "▲▼ 还有 N 只" when the party is more than six
   };
   function drawBar() {
     const g = CoopGame.state(), mode = CoopGame.uiMode() || '';
@@ -184,11 +189,13 @@
       return;
     }
     if (g.starters && g.starters.picker && CoopGame.uiMode() === 'STARTER_SELECT') {
-      const t = g.starters, sig = 'starters ' + t.picker + t.left.p1 + ',' + t.left.p2;
+      const t = g.starters, me = t.picker, sig = 'starters ' + me + t.left.p1 + ',' + t.left.p2 + ',' + (t.picks ? t.picks.p1 + ',' + t.picks.p2 : '');
       if (sig !== lastSig) {
         lastSig = sig; lastStates = {}; layer.removeAll(true);
-        // bottom-left, over the keyboard hint (the filter bar along the top is in use)
-        layer.add(cornerTag(t.picker, '挑 · 1P 剩 ' + t.left.p1 + ' 点 · 2P 剩 ' + t.left.p2 + ' 点', 2, 160));
+        // bottom-left, over the keyboard hint (the filter bar along the top is in use). Two rounds: 1P, then 2P.
+        const mine = t.picks ? '已挑 ' + t.picks[me] + (t.cap ? '/' + t.cap : '') + ' 只 · ' : '';
+        const rest = me === 'p1' ? '挑完按开始，再轮到 2P' : '1P 挑了 ' + (t.picks ? t.picks.p1 : '?') + ' 只';
+        layer.add(cornerTag(me, (me === 'p1' ? '先挑 · ' : '挑 · ') + mine + '剩 ' + t.left[me] + ' 点 · ' + rest, 2, 160));
       }
       return;
     }

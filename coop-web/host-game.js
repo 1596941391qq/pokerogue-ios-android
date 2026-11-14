@@ -10,6 +10,7 @@
 // - Party: both players' Pokémon and the bag, for the phone's team sheet.
 // - 2P away (never joined, or dropped): nothing waits for 2P; 1P's keyboard plays every Pokémon and
 //   answers every prompt until the guest is back.
+// - Starters: 1P's round, then 2P's (host-team.js); only the one whose round it is can press.
 // - Shouts: four preset lines, 2P from the phone ({say: n}), 1P with F1–F4.
 window.CoopGame = (function () {
   const log = (...a) => console.log('COOP', ...a.map(x => typeof x === 'string' ? x : JSON.stringify(x)));
@@ -117,7 +118,7 @@ window.CoopGame = (function () {
     if (slot < 0 || !mon || !mon.isActive(true)) return null;
     const moves = mon.getMoveset().filter(Boolean).map(m => {
       const max = m.getMovePp(), left = max - m.ppUsed;
-      return { name: m.getName(), pp: left, max, ok: left > 0 };
+      return { name: m.getName(), pp: left, max, ok: left > 0 && !(window.CoopMods && CoopMods.moveBlocked(mon, m.moveId)) };
     });
     const targets = s.getEnemyField().filter(e => e && e.isActive(true)).map(e => ({ name: nameOf(e), bi: e.getBattlerIndex() }));
     return { key, mon: nameOf(mon), moves, targets };
@@ -209,6 +210,12 @@ window.CoopGame = (function () {
     if (!stage) {
       st.p1 = st.p2 = null; st.mons = [];
       sendState('mate', { mate: null });
+      // Out of a run (title, picking starters): forget the last turn's key and pick panel. The next run can
+      // start on the same wave:turn (1:1 after 1:1), and 2P would be offered the moves of the run that was left.
+      if ((!b || uiMode() === 'TITLE') && (st.turnKey || st.pick)) {
+        st.turnKey = ''; st.pick = null; st.choice = null; st.intent2 = null;
+        sendState('pick', { pick: null });
+      }
       st.reward = T.reward();
       st.starters = T.starters();
       const q = ph && PROMPT[ph.phaseName];
@@ -223,12 +230,12 @@ window.CoopGame = (function () {
         }
       } catch {}
       st.shared = shared;
-      if (st.starters && st.starters.picker) { // picking starters: take turns, each with their own points
-        const t = st.starters, w = t.picker;
+      if (st.starters && st.starters.picker) { // picking starters: 1P's round, then 2P's, each with their own points
+        const t = st.starters, w = t.picker, cap = t.cap || 6;
         st.owner = w;
         sendState('turn', w === 'p2'
-          ? { turn: 'p2', text: '轮到你挑初始宝可梦', sub: '你还剩 ' + t.left.p2 + ' 点（共 ' + t.lim + '）' }
-          : { turn: 'p1', text: '1P 在挑初始宝可梦', sub: '你还剩 ' + t.left.p2 + ' 点，1P 挑完轮到你' });
+          ? { turn: 'p2', text: '轮到你挑初始宝可梦', sub: '已挑 ' + t.picks.p2 + '/' + cap + ' · 剩 ' + t.left.p2 + ' 点 · 挑完按开始' }
+          : { turn: 'p1', text: '1P 在挑初始宝可梦', sub: '1P 挑完轮到你（最多 ' + cap + ' 只）' });
       } else if (st.reward) {
         const r = st.reward, first = r.round === 1;
         st.owner = r.picker;
@@ -301,7 +308,7 @@ window.CoopGame = (function () {
         name: nameOf(p), lv: p.level, hp: p.hp, max: p.getMaxHp(),
         st: p.isFainted() ? '濒死' : STATUS[(p.status && p.status.effect) || 0] || '',
         who: o ? T.label(o) : '', field: field.includes(p),
-        items: p.getHeldItems().map(itemName),
+        items: p.getHeldItems().map(itemName).concat(window.CoopMods ? CoopMods.heldNames(p) : []),
       };
     });
     mons.sort((a, b) => (a.who > b.who) - (a.who < b.who)); // 1P's first, then 2P's

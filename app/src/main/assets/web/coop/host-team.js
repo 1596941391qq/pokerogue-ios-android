@@ -1,24 +1,34 @@
 // Co-op host, part 2 of 4: two teams in one game. Needs window.PRS_SCENE (the co-op game build exposes
-// its scene there). The game has one party; here every Pokémon in it gets an owner, 1P or 2P:
-// - Starters: each player has their own points (10, or 15 in endless; the co-op build doubles the game's
-//   limit when window.PRS_COOP_TEAMS is set, and each player's half is checked here). The two take turns
-//   (whoever has fewer goes next, 1P first), so the first two, the ones on the field, are one each.
+// its scene there). The game has one party; here every Pokémon in it gets an owner, 1P or 2P, and each
+// player may have up to six (CAP), so the one party holds up to twelve:
+// - Starters: two rounds on the game's own starter screen. 1P picks up to six with their own points (10, or
+//   15 in endless: the game's own limit, per round), confirms, then 2P does the same; the two lists become
+//   one party with one of each player in the first two places (the ones on the field).
 //   Each starter belongs to whoever picked it. A caught Pokémon is the thrower's. Anything else that joins
 //   goes to whoever has fewer. Owners are kept in localStorage by Pokémon id, so they survive a restart.
 //   (A save from before co-op teams: alternating by party order.)
+// - More than six in the party: the game's party menu has six places (two on the field + four in reserve
+//   in a double battle) and uses the cursor as the place in the party. So the party itself is put in order
+//   for whoever is looking (their own reserve first, then the teammate's) and the menu shows the first six;
+//   moving past the last / first reserve row scrolls the reserve by one ("▲▼ 还有 N 只"). The cursor is
+//   always the real place in the party, so the rest of the game needs no change. With six or fewer nothing
+//   of this happens.
 // - Switching (fainted, between waves, or "换宝可梦" in battle) only offers the asker's own Pokémon, so
 //   1P's always replaces 1P's. When a player has nothing left to send out, the slot goes to the other.
 // - Rewards are 5 to choose from and both get one (5 选 2): one picks, then the other picks from the
-//   rest. Who goes first alternates by wave. An item that goes on a Pokémon only goes on your own.
+//   rest. Who goes first alternates by wave. An item that goes on a Pokémon only goes on your own, except
+//   medicine (HP, revive, status, PP: gone once used), which may be used on the teammate's Pokémon too.
 //   A special reward (a set list: fixed battles, mystery encounters) is one pick, by the same alternation.
 // - Held-item transfer, discard, fusion, reordering and releasing (on the reward screen's party menu) only
-//   touch the picker's own Pokémon; after a catch with a full party only the catcher's own can be released.
+//   touch the picker's own Pokémon; after a catch only the catcher's six count: when they are full the
+//   game asks which of their own to release (the teammate's room does not matter).
 // - Two players: every enemy Pokémon has double max HP (wild, trainers, bosses), on top of the double battles.
 window.CoopTeam = (function () {
   const log = (...a) => console.log('COOP', ...a.map(x => typeof x === 'string' ? x : JSON.stringify(x)));
   const KEY = 'coop-owners-v1';
   const UI_PARTY = 8, UI_STARTER = 10, OWNERS_KEPT = 2000;
-  const CAP = 3; // each player's share of the game's six party slots
+  const CAP = 6; // Pokémon per player (the game's own party limit, for each of the two)
+  const SLOTS = 6; // places in the game's party menu; its cursor uses 6 and 7 for the buttons
   window.PRS_COOP_TEAMS = true;
   const SWITCHING = [0, 1, 2]; // PartyUiMode SWITCH, FAINT_SWITCH, POST_BATTLE_SWITCH
   const ITEM_ON_MON = [4, 5, 6, 7, 14, 15]; // MODIFIER, MOVE_, TM_, REMEMBER_MOVE_, EVOLUTION_ITEM_, FORM_CHANGE_ITEM_
@@ -103,6 +113,7 @@ window.CoopTeam = (function () {
     proto.__coopRet = true;
     const start = proto.start;
     proto.start = function () {
+      try { settle(); } catch (e) { log('settle error', String(e)); }
       try {
         const r = slotToReturn(), s = scene();
         if (r) {
@@ -150,28 +161,314 @@ window.CoopTeam = (function () {
     const b = scene().currentBattle;
     return lastBall && b && lastBall.wave === b.waveIndex ? lastBall.who : null;
   }
-  // The game asks "party full, release one?" only at six. The co-op build also asks this hook (see the
-  // "full" patch in patch-coop.mjs / patch-web.mjs): the catcher already has their three.
-  window.PRS_COOP_FULL = () => { try { const w = catcher(); return !!w && count(w) >= CAP; } catch { return false; } };
+  // ---- a Pokémon joins: whose it is, and is there room ----
+  // Who gets the Pokémon being added now: a catch is the thrower's; anything else (a gift, a mystery
+  // encounter) goes to whoever has fewer, the encounter's decider when they have the same.
+  function receiver() {
+    let name = '';
+    try { name = scene().phaseManager.getCurrentPhase().phaseName; } catch {}
+    const c = catcher();
+    if (c && name === 'AttemptCapturePhase') return c;
+    const a = count('p1'), b = count('p2');
+    if (a !== b) return a < b ? 'p1' : 'p2';
+    if (c) return c;
+    const bt = scene().currentBattle;
+    return mePicker((bt && bt.waveIndex) || 0);
+  }
+  let joining = null; // {who, wave}: the answer given to the game's "is the party full?" just before it adds one
+  const waveNow = () => { const b = scene().currentBattle; return b ? b.waveIndex : -1; };
+  const joinsTo = () => (joining && joining.wave === waveNow() ? joining.who : null);
+  // The game asks "party full, release one?" at six in the party. The co-op build asks this hook instead
+  // (the "full" and "mefull" patches in patch-coop.mjs / patch-web.mjs): full means the one who gets the
+  // Pokémon already has their six, however many the teammate has.
+  window.PRS_COOP_FULL = () => {
+    try {
+      const w = receiver();
+      joining = { who: w, wave: waveNow() };
+      return count(w) >= CAP || party().length >= 2 * CAP;
+    } catch (e) { log('full check error', String(e)); return party().length >= SLOTS; }
+  };
+  const saveOwners = () => { try { localStorage.setItem(KEY, JSON.stringify(owners)); } catch {} };
+  const protoWith = (obj, method) => {
+    for (let p = obj && Object.getPrototypeOf(obj); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) if (Object.prototype.hasOwnProperty.call(p, method)) return p;
+    return null;
+  };
+  // The game's own "add the caught Pokémon" (EnemyPokemon.addToParty, used by a catch and by mystery
+  // encounters) does nothing at six or more in the party, and the Nincada evolution only leaves a Shedinja
+  // behind below six. Both look at the party's length at that moment only, so for that one call the party
+  // is shortened to five and put back right after (nothing else runs in between).
+  function hookJoin(s) {
+    const enemy = (s.getEnemyParty && s.getEnemyParty()[0]) || null;
+    const ep = enemy && protoWith(enemy, 'addToParty');
+    if (ep && !ep.__coopJoin) {
+      ep.__coopJoin = true;
+      const add = ep.addToParty;
+      ep.addToParty = function (ball, slot = -1) {
+        const l = party(), n = l.length;
+        let who = null;
+        try { who = joinsTo() || receiver(); } catch {}
+        joining = null;
+        let rest = null, r;
+        if (n >= SLOTS && n < 2 * CAP) rest = l.splice(SLOTS - 1);
+        try { r = add.call(this, ball, slot); } finally { if (rest) l.push(...rest); }
+        if (!r) { log('join: not added (party of ' + n + ')'); return r; }
+        if (rest && !(slot >= 0 && slot < SLOTS)) { const i = l.indexOf(r); if (i >= 0) { l.splice(i, 1); l.push(r); } } // no place asked for: last
+        if (who) { owners[r.id] = who; saveOwners(); log('owner', (r.getNameToRender ? r.getNameToRender() : r.name) + ' -> ' + label(who) + ' (joined, party of ' + l.length + ')'); }
+        return r;
+      };
+      log('join: up to ' + CAP + ' each');
+    }
+    const mine = party()[0];
+    const pp = mine && protoWith(mine, 'handleSpecialEvolutions');
+    if (pp && !pp.__coopJoin) {
+      pp.__coopJoin = true;
+      const special = pp.handleSpecialEvolutions;
+      pp.handleSpecialEvolutions = function (...a) {
+        const l = party(), who = ownerOf(this), before = new Set(l);
+        let rest = null, r;
+        if (who && l.length >= SLOTS && l.length < 2 * CAP && count(who) < CAP) rest = l.splice(SLOTS - 1);
+        try { r = special.apply(this, a); } finally { if (rest) l.push(...rest); }
+        try {
+          l.filter(p => !before.has(p)).forEach(p => { // the Shedinja left behind: its owner's, last in the party
+            if (rest) { l.splice(l.indexOf(p), 1); l.push(p); }
+            if (who) { owners[p.id] = who; saveOwners(); log('owner', p.name + ' -> ' + label(who) + ' (left behind by an evolution)'); }
+          });
+        } catch (e) { log('evolution join error', String(e)); }
+        return r;
+      };
+    }
+  }
+  // ---- the party menu with more than six in the party ----
+  // view.h: the menu while it is open; view.who: who is looking; view.off: how many reserve Pokémon are
+  // scrolled away above the rows on screen. The reserve as a list is: those `off`, then the rows on screen,
+  // then the rest; in the party array the rows on screen always come right after the field places.
+  const view = { h: null, who: null, off: 0, pos: null, hint: null };
+  const big = () => party().length > SLOTS;
+  const bench0 = () => { const b = scene().currentBattle; return Math.max(1, Math.min(SLOTS - 1, (b && b.getBattlerCount && b.getBattlerCount()) || 1)); };
+  // Put the party in a new order, in place (the game and its menus hold on to the array itself), and take
+  // along everything that remembers a Pokémon by its place: a switch already chosen this turn, phases
+  // waiting in the queue (exp, level up, move learning, a switch about to happen) and the open menu.
+  function reorder(next) {
+    const l = party(), s = scene();
+    const to = new Map();
+    next.forEach((p, i) => to.set(p, i));
+    if (next.length !== l.length || to.size !== l.length || l.some(p => !to.has(p))) { log('reorder refused: not the same Pokémon'); return false; }
+    const map = l.map(p => to.get(p)); // old place -> new place
+    if (map.every((x, i) => x === i)) return false;
+    for (let i = 0; i < next.length; i++) l[i] = next[i];
+    const mv = i => (Number.isInteger(i) && i >= 0 && i < map.length ? map[i] : i);
+    let moved = 0;
+    try {
+      const b = s.currentBattle, tc = b && b.turnCommands;
+      if (tc) for (const slot of [0, 1]) { const c = tc[slot]; if (c && c.command === 2 && Number.isInteger(c.cursor) && mv(c.cursor) !== c.cursor) { c.cursor = mv(c.cursor); moved++; } }
+    } catch (e) { log('reorder: commands', String(e)); }
+    try {
+      const pm = s.phaseManager, seen = new Set();
+      const take = ph => {
+        if (!ph || typeof ph !== 'object' || !ph.phaseName || seen.has(ph)) return;
+        seen.add(ph);
+        if (ph.player !== true) return; // the enemy's side, or not about one party member
+        if (Number.isInteger(ph.partyMemberIndex) && mv(ph.partyMemberIndex) !== ph.partyMemberIndex) { ph.partyMemberIndex = mv(ph.partyMemberIndex); moved++; }
+        if (ph.phaseName === 'SwitchSummonPhase' && Number.isInteger(ph.slotIndex) && mv(ph.slotIndex) !== ph.slotIndex) { ph.slotIndex = mv(ph.slotIndex); moved++; }
+      };
+      take(pm.currentPhase); take(pm.standbyPhase);
+      (((pm.phaseQueue || {}).levels) || []).forEach(lv => (lv || []).forEach(take));
+      const dm = (pm.dynamicQueueManager || {}).dynamicPhaseMap;
+      if (dm && dm.forEach) dm.forEach(q => ((q && q.queue) || []).forEach(take));
+    } catch (e) { log('reorder: phases', String(e)); }
+    const h = view.h;
+    if (h) {
+      try {
+        if (h.transferMode) h.transferCursor = mv(h.transferCursor);
+        if (h.partySwitchCursor >= 0) h.partySwitchCursor = mv(h.partySwitchCursor);
+        if (h.partySlots && h.partySlots.length === l.length) { const old = h.partySlots.slice(); old.forEach((sl, i) => { h.partySlots[map[i]] = sl; }); }
+      } catch (e) { log('reorder: menu', String(e)); }
+    }
+    if (moved) log('reorder: ' + moved + ' waiting place(s) moved along');
+    return true;
+  }
+  function listNow() {
+    const l = party(), b = bench0(), win = SLOTS - b, bench = l.slice(b);
+    const rows = bench.slice(0, win), rest = bench.slice(win), off = Math.min(view.off, rest.length);
+    return { b, win, off, list: rest.slice(0, off).concat(rows, rest.slice(off)) };
+  }
+  // The reserve in the order the players see it (Pokémon ids). The party array itself is left turned the way
+  // the menu was scrolled when it closed (the game still reads places from it right after), so the order is
+  // kept here and put back the next time the menu opens and at the start of every turn.
+  let canon = [];
+  function canonList() {
+    const bench = party().slice(bench0());
+    const at = p => { const i = canon.indexOf(p.id); return i < 0 ? canon.length : i; };
+    return bench.map((p, i) => [p, at(p), i]).sort((x, y) => x[1] - y[1] || x[2] - y[2]).map(x => x[0]);
+  }
+  function settle() {
+    if (!big() || view.h || !canon.length) return;
+    const l = party(), b = bench0(), list = canonList();
+    if (list.every((p, i) => l[b + i] === p)) return;
+    view.off = 0;
+    reorder(l.slice(0, b).concat(list));
+  }
+  function showFrom(list, off) {
+    const l = party(), b = bench0(), win = SLOTS - b;
+    off = Math.max(0, Math.min(off, Math.max(0, list.length - win)));
+    view.off = off;
+    canon = list.map(p => p.id);
+    return reorder(l.slice(0, b).concat(list.slice(off, off + win), list.slice(0, off), list.slice(off + win)));
+  }
+  // the menu is about to open for `who`: their own reserve first, then the teammate's, from the top
+  function arrange(who) {
+    view.off = 0; view.order = null;
+    if (!big()) return;
+    const list = canonList();
+    const mine = who ? list.filter(p => owners[p.id] === who) : list, others = who ? list.filter(p => owners[p.id] !== who) : [];
+    showFrom(mine.concat(others), 0);
+  }
+  function dropHint() { if (view.hint) { try { view.hint.destroy(); } catch {} view.hint = null; } }
+  const smallText = (str, color, size) => new Phaser.GameObjects.Text(scene(), 0, 0, str, { fontFamily: 'emerald', fontSize: size, color, padding: { bottom: 6 } })
+    .setScale(1 / 6).setShadow(3, 4, '#0b0910', 0, false, true);
+  function drawHint(h) {
+    dropHint();
+    if (!big() || !window.Phaser || !h.partyContainer) return;
+    const v = listNow(), above = v.off, below = Math.max(0, v.list.length - v.win - v.off);
+    const str = above && below ? '▲ 上面 ' + above + ' 只　▼ 下面 ' + below + ' 只' : above ? '▲ 上面还有 ' + above + ' 只' : below ? '▼ 下面还有 ' + below + ' 只' : '';
+    if (!str) return;
+    view.hint = smallText(str, '#ffd84a', 66).setOrigin(1, 0).setPosition(317, -179);
+    h.partyContainer.add(view.hint);
+  }
+  // after the game has drawn a slot for every Pokémon in the party: tag each with its owner, and with more
+  // than six keep only the first six on screen (the others sit below the screen edge otherwise)
+  function afterPopulate(h) {
+    view.pos = null;
+    if (window.Phaser) h.partySlots.forEach(sl => {
+      const o = ownerOf(sl.getPokemon());
+      if (!o || !sl.slotBg) return;
+      const t = smallText(label(o), o === 'p1' ? '#4aa3ff' : '#f5c84c', 54).setOrigin(1, 0);
+      t.setPosition(sl.slotBg.x + sl.slotBg.displayWidth - 3, sl.slotBg.y + 1);
+      sl.add(t);
+    });
+    view.n = party().length;
+    if (!big()) { view.order = null; dropHint(); return; }
+    view.pos = h.partySlots.map(sl => [sl.x, sl.y]);
+    view.off = Math.min(view.off, Math.max(0, party().length - SLOTS));
+    view.order = listNow().list;
+    canon = view.order.map(p => p.id);
+    h.partySlots.forEach((sl, i) => sl.setVisible(i < SLOTS));
+    drawHint(h);
+  }
+  // one was released while the menu is open: the list closes up where it was (the game cut it out of the
+  // party array, which would leave the rows above and below the window in the wrong order)
+  function closeUp(h) {
+    if (view.h !== h || !view.order || !view.n || view.n === party().length) return;
+    const l = party(), b = bench0(), bench = l.slice(b);
+    const list = view.order.filter(p => bench.includes(p));
+    bench.forEach(p => { if (!list.includes(p)) list.push(p); });
+    showFrom(list, view.off);
+  }
+  // slots follow their Pokémon to its new place (same objects, so what the menu wrote on them stays)
+  function place(h) {
+    const pos = view.pos;
+    if (!pos) return;
+    h.partySlots.forEach((sl, i) => {
+      if (pos[i]) sl.setPosition(pos[i][0], pos[i][1]);
+      sl.slotIndex = i;
+      sl.setVisible(i < SLOTS);
+      if (i === h.cursor) sl.select(); else sl.deselect();
+    });
+    view.order = listNow().list;
+    canon = view.order.map(p => p.id);
+    drawHint(h);
+  }
+  function scroll(h, d) {
+    const v = listNow(), off = v.off + d;
+    if (off < 0 || off > v.list.length - v.win) return false;
+    showFrom(v.list, off);
+    place(h);
+    try { h.showPartyText(); } catch {}
+    return true;
+  }
+  // An item transfer or a fusion starts on one Pokémon and ends on another, and the game only accepts both
+  // among the first six: when the first one has been scrolled away, bring it back before the second is confirmed.
+  function bringIn(h) {
+    if (!h.transferMode || !(h.transferCursor >= SLOTS)) return;
+    const l = party(), b = bench0();
+    let j = SLOTS - 1;
+    if (j === h.cursor) j--;
+    if (j < b) return;
+    const next = l.slice();
+    [next[j], next[h.transferCursor]] = [next[h.transferCursor], next[j]];
+    if (reorder(next)) place(h);
+  }
+  // medicine: used up on the spot (HP, revive, status, PP). May be used on the teammate's Pokémon.
+  const MEDICINE = ['PokemonHpRestoreModifierType', 'PokemonStatusHealModifierType', 'PokemonPpRestoreModifierType', 'PokemonAllMovePpRestoreModifierType'];
+  function isMedicine(type) {
+    for (let p = type && Object.getPrototypeOf(type); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+      if (p.constructor && MEDICINE.includes(p.constructor.name)) return true;
+    }
+    return false;
+  }
+
   // ---- the party menu only offers your own Pokémon ----
   function hookParty(s) {
     const h = s.ui && s.ui.handlers && s.ui.handlers[UI_PARTY];
     if (!h || h.__coop) return;
     h.__coop = true;
+    const populate = h.populatePartySlots;
+    h.populatePartySlots = function () {
+      try { closeUp(this); } catch (e) { log('party list error', String(e)); }
+      const r = populate.apply(this, arguments);
+      try { afterPopulate(this); } catch (e) { log('party slots error', String(e)); }
+      return r;
+    };
+    const input = h.processInput;
+    h.processInput = function (button) {
+      try {
+        if (this.active && big() && !this.pendingPrompt && !this.blockInput && !this.awaitingActionInput) {
+          if (button === 5) bringIn(this);
+          if (!this.optionsMode) {
+            const last = Math.min(SLOTS, party().length) - 1;
+            let done = false;
+            if (button === 1 && this.cursor === last) done = scroll(this, 1); // 下 on the last row: the next one comes up
+            else if (button === 0 && this.cursor === bench0()) done = scroll(this, -1);
+            else if (button === 0 && this.cursor === 6) { this.setCursor(last); done = true; } // from 取消 up: the last row on screen
+            if (done) { try { this.getUi().playSelect(); } catch {} return true; }
+          }
+        }
+      } catch (e) { log('party scroll error', String(e)); }
+      return input.call(this, button);
+    };
+    const clear = h.clear;
+    h.clear = function () {
+      dropHint();
+      view.h = null; view.pos = null; view.order = null; view.n = 0;
+      return clear.apply(this, arguments);
+    };
     const show = h.show;
     h.show = function (args) {
       try {
         const mode = args[0];
         let who = null;
         let any = false; // nothing of their own passes the game's filter: let them pick anyone
+        let medicine = false;
         if (SWITCHING.includes(mode)) who = askerFor(args[1], mode === 1); // 1 = FAINT_SWITCH
-        else if (ITEM_ON_MON.includes(mode) || mode === 9) who = rewardPicker(); // 9 = SPLICE: both halves your own
+        else if (ITEM_ON_MON.includes(mode) || mode === 9) { // 9 = SPLICE: both halves your own
+          who = rewardPicker();
+          try { // the menu was opened by the game for exactly that item (its own filter came along), not by anything else
+            const ph = scene().phaseManager.getCurrentPhase(), item = ph && ph.__coopItem;
+            medicine = mode !== 9 && !!who && isMedicine(item) && (typeof item.selectFilter === 'function' ? args[3] === item.selectFilter : args[3] == null);
+          } catch {}
+          if (medicine) log('party menu: medicine, ' + label(who) + ' may use it on either team');
+        }
         else if (mode === 3) { // REVIVAL_BLESSING: the user's owner revives one of their own (no cancel in this mode)
           who = ownerOf(party()[args[1]]);
           any = !!who && !party().some(p => owners[p.id] === who && p.isFainted());
         }
         this.__coopAsker = SWITCHING.includes(mode) ? who : null; // for 放生 from the in-battle switch menu
-        if (who && !any) {
+        if (!this.active && args.length) { // the menu really opens now: set its list up for whoever is looking
+          view.h = this;
+          view.who = who || (mode === 10 ? joinsTo() || catcher() : null) || actor();
+          arrange(view.who);
+        }
+        if (who && !any && !medicine) {
           const base = typeof args[3] === 'function' ? args[3] : null;
           const switching = SWITCHING.includes(mode);
           args = args.slice();
@@ -215,9 +512,9 @@ window.CoopTeam = (function () {
     // releasing: after a catch with a full party (RELEASE 10) only the catcher's own; from 查看队伍 only
     // the picker's own, and never your last one; from the in-battle switch menu only the asker's own
     wrap('processReleaseOption', function (pokemon) {
-      const mode = this.partyUiMode, who = mode === 10 ? catcher() : rewardPicker() || this.__coopAsker, o = ownerOf(pokemon);
+      const mode = this.partyUiMode, who = mode === 10 ? joinsTo() || catcher() : rewardPicker() || this.__coopAsker, o = ownerOf(pokemon);
       if (!who || !o) return null;
-      // after a catch: your own; the teammate's only when they hold more than their three and you fewer
+      // after a catch: your own; the teammate's only when they hold more than their share and you fewer
       if (o !== who && !(mode === 10 && count(who) < CAP && count(o) > CAP)) return () => refuse(this, notYours(o));
       if (mode !== 10 && count(who) <= 1) return () => refuse(this, '这是你最后一只宝可梦，不能放生');
       return null;
@@ -235,102 +532,79 @@ window.CoopTeam = (function () {
     log('party menu: own Pokémon only');
   }
 
-  // ---- starters: own points, taking turns ----
-  // parallel to the starter screen's partyStarterIds, in the order that becomes the party. Only changed
-  // when a starter is added or removed: the screen empties its list when the run starts, and the owners
-  // must survive that until assign() reads them.
+  // ---- starters: two rounds, each with their own points ----
+  // The game's starter screen holds six and checks its own points limit (10, or 15 in endless). It is used
+  // twice: 1P picks and confirms, the screen is emptied, 2P picks and confirms; then the run starts with
+  // both lists as one party: 1P's first, 2P's first (the two on the field), then the rest of each.
+  // starterOwners is parallel to that party and is read by assign() when the run's party appears.
   let starterOwners = [], startersPicked = false;
-  const alternate = n => Array.from({ length: n }, (x, i) => (i % 2 ? 'p2' : 'p1'));
   let starterHandler = null;
-  function starterBudget(h) {
-    const ids = h.partyStarterIds || [], gd = scene().gameData;
-    let own = starterOwners;
-    if (own.length === ids.length + 1) own = own.slice(0, ids.length); // in the middle of adding one
-    else if (own.length !== ids.length) own = alternate(ids.length); // a list we didn't see built
-    const spent = { p1: 0, p2: 0 }, picks = { p1: 0, p2: 0 };
-    ids.forEach((id, i) => { const w = own[i]; spent[w] += gd.getSpeciesStarterValue(id); picks[w]++; });
-    const lim = ((scene().gameMode || {}).modeId === 1 || (scene().gameMode || {}).modeId === 2) ? 15 : 10;
-    // the cheapest starter still on offer: a player with less than that left is done picking
-    let min = Infinity;
-    try {
-      (h.starterContainers || []).forEach(c => {
-        const id = c.species.speciesId, dex = gd.dexData[id];
-        if (dex && dex.caughtAttr && !ids.includes(id)) min = Math.min(min, gd.getSpeciesStarterValue(id)); // only ones you have
-      });
-    } catch {}
-    if (!isFinite(min)) min = 1;
-    return { spent, picks, lim, min, left: { p1: lim - spent.p1, p2: lim - spent.p2 }, full: ids.length >= 6 };
-  }
-  // whose pick is next: whoever has fewer (1P first); someone out of points is skipped
+  const round = { n: 1, first: null, spent: 0 }; // first: 1P's picks, kept while 2P picks
+  const startLimit = () => { const m = (scene().gameMode || {}).modeId; return m === 1 || m === 2 ? 15 : 10; };
+  const starterCost = ids => ids.reduce((a, id) => a + scene().gameData.getSpeciesStarterValue(id), 0);
+  // whose round it is
   function starterPicker() {
     const h = starterHandler;
-    if (!h || !h.active) return null;
-    const b = starterBudget(h);
-    if (b.full) return null;
-    const can = w => b.picks[w] < CAP && b.left[w] >= b.min; // three each at most
-    let who = b.picks.p1 <= b.picks.p2 ? 'p1' : 'p2';
-    if (!can(who)) who = other(who);
-    return can(who) ? who : null;
+    return h && h.active ? (round.n === 1 ? 'p1' : 'p2') : null;
   }
   function hookStarters(s) {
     const h = s.ui && s.ui.handlers && s.ui.handlers[UI_STARTER];
     if (!h || h.__coop) return;
     h.__coop = true;
     starterHandler = h;
-    const add = h.addToParty;
-    h.addToParty = function (...a) {
-      const who = starterPicker() || 'p1';
-      if (starterOwners.length !== this.partyStarterIds.length) starterOwners = alternate(this.partyStarterIds.length);
-      starterOwners.push(who);
-      startersPicked = true;
-      try { return add.apply(this, a); } catch (e) { starterOwners.pop(); throw e; }
-      finally { log('starter ' + this.partyStarterIds.length + ' -> ' + label(who)); }
-    };
-    const pop = h.popPartyStarter;
-    // leaving the screen (the run starts) empties the list one by one: keep the owners through that
-    let clearing = false;
-    const clear = h.clear;
-    h.clear = function () { clearing = true; try { return clear.apply(this, arguments); } finally { clearing = false; } };
-    h.popPartyStarter = function (index) {
-      if (!clearing && starterOwners.length === this.partyStarterIds.length) starterOwners.splice(index, 1);
-      return pop.call(this, index);
-    };
-    const upd = h.tryUpdateValue;
-    h.tryUpdateValue = function (add = 0, addingToParty) {
-      const b = starterBudget(this), who = starterPicker();
-      if (addingToParty && who && add > b.left[who]) { log('starter refused: ' + label(who) + ' has ' + b.left[who] + ' points left'); return false; }
-      const r = upd.call(this, add, addingToParty);
+    const show = h.show;
+    h.show = function (args) {
       try {
-        // grey out what the player picking now cannot afford with their own points
-        if (who) this.starterContainers.forEach(c => {
-          const cost = scene().gameData.getSpeciesStarterValue(c.species.speciesId);
-          if (cost > b.left[who] && !this.partyStarterIds.includes(c.species.speciesId)) c.icon.setAlpha(0.375);
-        });
-      } catch {}
-      return r;
+        if (args && args.length && typeof args[0] === 'function') { // the screen opens for a new run
+          const run = args[0], self = this;
+          round.n = 1; round.first = null; round.spent = 0;
+          const picked = function (list) {
+            if (round.n === 1) { // 1P is done: keep their picks, empty the screen, 2P's round
+              round.first = list.slice();
+              round.spent = starterCost(self.partyStarterIds);
+              round.n = 2;
+              self.starterSelectCallback = picked; // the game dropped it before calling
+              while (self.partyStarterIds.length > 0) self.popPartyStarter(self.partyStarterIds.length - 1);
+              try { self.tryUpdateValue(); } catch {}
+              try { self.clearText(); } catch {}
+              log('starters: 1P picked ' + round.first.length + ' (' + round.spent + ' points), 2P picks now');
+              return;
+            }
+            const a = round.first || [], b = list.slice();
+            const all = [a[0], b[0], ...a.slice(1), ...b.slice(1)].filter(Boolean);
+            starterOwners = [a.length ? 'p1' : null, b.length ? 'p2' : null, ...a.slice(1).map(() => 'p1'), ...b.slice(1).map(() => 'p2')].filter(Boolean);
+            startersPicked = true;
+            log('starters: 1P ' + a.length + ' + 2P ' + b.length + ' = ' + all.length);
+            round.n = 1; round.first = null; round.spent = 0;
+            return run(all);
+          };
+          args = args.slice();
+          args[0] = picked;
+        }
+      } catch (e) { log('starter rounds error', String(e)); }
+      return show.call(this, args);
     };
-    // starting the run while one player has picked nothing (and could): not yet
+    // the confirm question says whose round ends
     const start = h.tryStart;
     if (typeof start === 'function') h.tryStart = function (...a) {
-      try {
-        const b = starterBudget(this), none = ['p1', 'p2'].find(w => !b.picks[w] && b.left[w] >= b.min);
-        const sig = this.partyStarterIds.join(',');
-        if (this.partyStarterIds.length && !b.full && none && this.__coopRefused !== sig) {
-          this.__coopRefused = sig; // asked once for these picks: pressing start again goes ahead
-          log('start refused: ' + label(none) + ' has not picked yet');
-          try { this.showText('两人都要至少挑一只，' + label(none) + ' 还没挑（再按一次就这样开始）', undefined, () => { try { this.clearText(); } catch {} }, 1800); } catch {}
-          return false;
-        }
-      } catch (e) { log('start check error', String(e)); }
-      return start.apply(this, a);
+      const ui = this.getUi(), own = Object.prototype.hasOwnProperty.call(ui, 'showText'), st = ui.showText;
+      ui.showText = function (text, ...r) {
+        return st.call(this, round.n === 1 ? '1P 就带这 ' + h.partyStarterIds.length + ' 只吗？\n确定后轮到 2P 挑。' : '2P 就带这 ' + h.partyStarterIds.length + ' 只吗？\n确定后两队一起出发。', ...r);
+      };
+      try { return start.apply(this, a); } finally { if (own) ui.showText = st; else delete ui.showText; }
     };
-    log('starters: own points on');
+    log('starters: two rounds, own points');
   }
   function starters() {
     const h = starterHandler;
     if (!h || !h.active) return null;
-    const b = starterBudget(h);
-    return { picker: starterPicker(), left: b.left, lim: b.lim, picks: b.picks };
+    const lim = startLimit(), now = starterCost(h.partyStarterIds || []), n = (h.partyStarterIds || []).length;
+    const first = round.n === 1;
+    return {
+      picker: starterPicker(), round: round.n, lim, cap: CAP,
+      left: { p1: first ? lim - now : lim - round.spent, p2: first ? lim : lim - now },
+      picks: { p1: first ? n : (round.first || []).length, p2: first ? 0 : n },
+    };
   }
 
   // ---- rewards: 5 选 2 ----
@@ -348,6 +622,8 @@ window.CoopTeam = (function () {
       if (!c || this.customModifierSettings) return n; // a set list (the second round, or a special reward)
       return c.round === 1 ? n + 2 : n + 1; // normally 3 -> 5; the second round's reroll gives one fewer
     };
+    const menu = proto.openModifierMenu; // the party menu opens for an item: which one (medicine may go to the teammate's)
+    if (typeof menu === 'function') proto.openModifierMenu = function (type, ...r) { this.__coopItem = type; return menu.call(this, type, ...r); };
     const select = proto.selectRewardModifierOption;
     proto.selectRewardModifierOption = function (cursor, cb) { this.__coopCursor = cursor; return select.call(this, cursor, cb); };
     const apply = proto.applyModifier;
@@ -507,6 +783,7 @@ window.CoopTeam = (function () {
     if (n === 'SelectModifierPhase') return (ph.__coop && ph.__coop.picker) || null;
     if (n === 'CommandPhase' || n === 'SelectTargetPhase') return ownerOf(party()[ph.fieldIndex]);
     if (n === 'AttemptCapturePhase') return catcher();
+    if (n === 'EvolutionPhase') return ownerOf(ph.pokemon); // the Poké Ball a Shedinja needs is its owner's
     if (n.indexOf('MysteryEncounter') >= 0) { const b = scene().currentBattle; return b ? mePicker(b.waveIndex || 0) : null; }
     return null;
   }
@@ -673,7 +950,7 @@ window.CoopTeam = (function () {
   setInterval(() => {
     const s = scene();
     if (!s || !s.phaseManager) return;
-    try { hookPhases(s); hookParty(s); hookStarters(s); hookPurse(s); watchBalls(); ownersFromSave(s); assign(); enemyRule(); purseTick(s); } catch (e) { log('team error', String(e)); }
+    try { hookPhases(s); hookParty(s); hookStarters(s); hookPurse(s); hookJoin(s); watchBalls(); ownersFromSave(s); assign(); enemyRule(); purseTick(s); } catch (e) { log('team error', String(e)); }
   }, 150);
 
   // the reward round on screen now: {round, picker} or null; a special one-pick reward has single: true
@@ -681,5 +958,5 @@ window.CoopTeam = (function () {
     const s = scene();
     try { const ph = s.phaseManager.getCurrentPhase(); return ph && ph.phaseName === 'SelectModifierPhase' && ph.__coop ? ph.__coop : null; } catch { return null; }
   }
-  return { ownerOf, askerFor, canSendOut, reward, sharedPicker, catcher, starters, label, other, count, CAP, hpMult, setHpMult, purse: purseNow, actor, owners: () => owners, starterOwners: () => starterOwners.slice() };
+  return { ownerOf, askerFor, canSendOut, reward, sharedPicker, catcher, receiver, starters, label, other, count, CAP, hpMult, setHpMult, purse: purseNow, actor, owners: () => owners, starterOwners: () => starterOwners.slice(), view: () => ({ who: view.who, off: view.off, open: !!view.h }) };
 })();
