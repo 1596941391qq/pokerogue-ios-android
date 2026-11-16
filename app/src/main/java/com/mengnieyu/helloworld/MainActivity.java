@@ -56,6 +56,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String GAME_HOST = "localhost";
     private static final int GAME_PORT = 6868;
     private static CanvasGameServer server;
+    private static long renderGoneAt = 0;
+    private static int renderGoneCount = 0;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -106,7 +108,14 @@ public class MainActivity extends AppCompatActivity {
                    intentArray = new Intent[]{intent};
                }
 
-               startActivityForResult(Intent.createChooser(contentSelectionIntent, "File Chooser"), FILECHOOSER_RESULTCODE);
+               try {
+                   startActivityForResult(Intent.createChooser(contentSelectionIntent, "File Chooser"), FILECHOOSER_RESULTCODE);
+               } catch (Exception e) {
+                   // no app on this phone can pick a file: tell the page "nothing chosen", or it never asks again
+                   mfilePathCallback = null;
+                   filePathCallback.onReceiveValue(null);
+                   Toast.makeText(MainActivity.this, "没有找到可以选文件的应用", Toast.LENGTH_LONG).show();
+               }
                return true;
            }
 
@@ -135,6 +144,31 @@ public class MainActivity extends AppCompatActivity {
         });
 
         webView.setWebViewClient(new WebViewClient(){
+            // The page's own process is gone (the system took its memory back, or it crashed): Android closes
+            // the whole app unless this says it is handled. Open the game again instead; saves are on disk.
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                try {
+                    FrameLayout frame = findViewById(R.id.my_frame_layout);
+                    frame.removeView(view);
+                    view.destroy();
+                } catch (Exception e) {
+                    // already gone
+                }
+                // three times within a minute: opening it again does not help, stop instead of looping
+                long now = System.currentTimeMillis();
+                renderGoneCount = now - renderGoneAt < 60000 ? renderGoneCount + 1 : 1;
+                renderGoneAt = now;
+                if (renderGoneCount >= 3) {
+                    Toast.makeText(MainActivity.this, "游戏画面连续被系统关闭，请关掉其他应用后重新打开游戏", Toast.LENGTH_LONG).show();
+                    finish();
+                    return true;
+                }
+                Toast.makeText(MainActivity.this, "游戏画面被系统回收了，正在重新打开…", Toast.LENGTH_LONG).show();
+                recreate();
+                return true;
+            }
+
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 // Anything that is not the game itself (wiki, Discord, the co-op join page) opens in the
@@ -220,17 +254,25 @@ public class MainActivity extends AppCompatActivity {
             super.onActivityResult(requestCode, resultCode, data);
             return;
         }
-        Uri uri = data.getData();
-
-
-        // Check that the response is a good one
-        if (resultCode == Activity.RESULT_OK&&data != null) {
-
-            mfilePathCallback.onReceiveValue(new Uri[]{uri});
-
+        // The page must always get an answer, also "nothing chosen" (null): backing out of the file picker
+        // gives data == null, and reading it closed the app (player reports 11-14: importing a save crashes).
+        // Some file managers put the file in the clip data instead of getData().
+        ValueCallback<Uri[]> callback = mfilePathCallback;
+        mfilePathCallback = null;
+        Uri[] result = null;
+        try {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                if (data.getData() != null) {
+                    result = new Uri[]{data.getData()};
+                } else if (data.getClipData() != null && data.getClipData().getItemCount() > 0
+                        && data.getClipData().getItemAt(0).getUri() != null) {
+                    result = new Uri[]{data.getClipData().getItemAt(0).getUri()};
+                }
+            }
+        } catch (Exception e) {
+            result = null;
         }
-
-
+        callback.onReceiveValue(result);
     }
 
 

@@ -65,8 +65,14 @@ html = html.replace(/<script defer src="\.\/coop\/[\w-]+\.js"><\/script>/g, '') 
 if (count(html, '<head>') !== 1 || count(html, '</head>') !== 1) fail('index.html: expected exactly one <head> and </head>')
 const compat = readFileSync(path.join(root, 'coop-web/compat.js'), 'utf8')
 if (compat.includes('</script')) fail('compat.js must not contain </script')
-html = html.replace('<head>', () => `<head>${START}<script>\n${compat}</script>${END}`).replace('</head>', () => `${TAG}</head>`)
+// save-guard.js needs the version of the bundled game: the one the game itself compares saves with
+const gameVersion = JSON.parse(readFileSync(path.join(root, 'pokerogue-version.json'), 'utf8')).pokerogueVersion
+if (!/^\d+(\.\d+)+$/.test(gameVersion || '')) fail('pokerogue-version.json: no pokerogueVersion')
+if (!readdirSync(path.join(web, 'assets')).some(f => f.endsWith('.js') && readFileSync(path.join(web, 'assets', f), 'utf8').includes('.gameVersion,`' + gameVersion + '`)'))) fail(`the game build does not check saves against ${gameVersion}: update pokerogue-version.json`)
+const guard = readFileSync(path.join(root, 'coop-web/save-guard.js'), 'utf8')
+if (guard.includes('</script')) fail('save-guard.js must not contain </script')
+html = html.replace('<head>', () => `<head>${START}<script>\n${compat}</script><script>window.PRS_GAME_VERSION=${JSON.stringify(gameVersion)};\n${guard}</script>${END}`).replace('</head>', () => `${TAG}</head>`)
 
 writeFileSync(indexFile, html)
-cpSync(path.join(root, 'coop-web'), path.join(web, 'coop'), { recursive: true, filter: src => !src.endsWith('compat.js') })
+cpSync(path.join(root, 'coop-web'), path.join(web, 'coop'), { recursive: true, filter: src => !src.endsWith('compat.js') && !src.endsWith('save-guard.js') })
 console.log(`patch-web: ${patched}; index.html + coop/ updated`)

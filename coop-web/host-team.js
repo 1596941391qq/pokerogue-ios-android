@@ -613,6 +613,8 @@ window.CoopTeam = (function () {
     const s = scene();
     try { const ph = s.phaseManager.getCurrentPhase(); return (ph && ph.__coop && ph.__coop.picker) || null; } catch { return null; }
   }
+  // Lure, Super Lure, Max Lure
+  const isLure = o => !!(o && o.type && (/^(SUPER_|MAX_)?LURE$/.test(o.type.id || '') || (o.type.constructor && o.type.constructor.name === 'DoubleBattleChanceBoosterModifierType')));
   function patchRewardPhase(proto) {
     if (proto.__coop) return;
     proto.__coop = true;
@@ -621,6 +623,24 @@ window.CoopTeam = (function () {
       const n = count.call(this), c = this.__coop;
       if (!c || this.customModifierSettings) return n; // a set list (the second round, or a special reward)
       return c.round === 1 ? n + 2 : n + 1; // normally 3 -> 5; the second round's reroll gives one fewer
+    };
+    // Co-op is double battles all the way, so a Lure (more double battles) does nothing: when one comes up in
+    // a co-op reward it is swapped for another item (asked for by players, 11-15). Solo runs are not touched.
+    const options = proto.getModifierTypeOptions;
+    if (typeof options === 'function') proto.getModifierTypeOptions = function () {
+      let opts = options.apply(this, arguments);
+      try {
+        if (this.__coop && Array.isArray(opts) && opts.some(isLure)) {
+          for (let i = 0; i < 4 && opts.some(isLure); i++) {
+            const have = new Set(opts.filter(o => !isLure(o)).map(o => o.type && o.type.id));
+            const spare = (options.apply(this, arguments) || []).filter(o => o && o.type && !isLure(o) && !have.has(o.type.id) && have.add(o.type.id));
+            opts = opts.map(o => (isLure(o) && spare.length ? spare.shift() : o));
+          }
+          opts = opts.filter(o => !isLure(o)); // nothing else came up in four tries: one option fewer
+          log('rewards: lure swapped out');
+        }
+      } catch (e) { log('lure filter error', String(e)); }
+      return opts;
     };
     const menu = proto.openModifierMenu; // the party menu opens for an item: which one (medicine may go to the teammate's)
     if (typeof menu === 'function') proto.openModifierMenu = function (type, ...r) { this.__coopItem = type; return menu.call(this, type, ...r); };

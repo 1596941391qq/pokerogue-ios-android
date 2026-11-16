@@ -108,6 +108,22 @@
     })(0);
   }
   var modsRow = function () { return el('div', { class: 'row' }, [el('button', { class: 'sub', text: 'Mod（民间创意工坊）', onclick: openMods })]); };
+  // on-screen buttons on / off (coop/gamepad.js keeps the choice)
+  function keysRow() {
+    var row = el('div', { class: 'row' }, []);
+    function draw() {
+      row.innerHTML = '';
+      var offNow = !!(window.PRS_PAD && window.PRS_PAD.manual && window.PRS_PAD.manual());
+      row.appendChild(el('button', { class: 'sub', text: offNow ? '屏幕按键：已隐藏（点一下显示）' : '屏幕按键：显示中（点一下隐藏）', onclick: function () {
+        if (!window.PRS_PAD || !window.PRS_PAD.setManual) return;
+        window.PRS_PAD.setManual(!offNow);
+        draw();
+      } }));
+    }
+    draw();
+    return row;
+  }
+  var keysHint = function () { return el('p', { text: '接了手柄或键盘、不想要屏幕上的按键时可以隐藏。隐藏后屏幕左边会留一个「按键」小标，点它按键就回来。' }); };
   var opening = false;
   function openRoom(useLan) {
     if (room || opening) return;
@@ -199,6 +215,8 @@
         el('p', { text: '敌人血量（两个人打，敌人比单人更耐打；改了从下一场战斗起生效）' }),
         hpRow(),
         modsRow(),
+        keysRow(),
+        keysHint(),
         el('p', { text: '加入朋友开的房间会跳到浏览器里玩（朋友开的是局域网房间时，直接扫他的二维码）。合作规则（双打、各自 10 点、每人最多 6 只、钱和精灵球各一份、5 选 2）只对开房间之后新开的一局生效。普通房间两边都要联网。' }),
       ]);
     } else {
@@ -233,6 +251,7 @@
         el('p', { text: '敌人血量（改了从下一场战斗起生效）' }),
         hpRow(),
         modsRow(),
+        keysRow(),
         el('div', { class: 'row' }, [el('button', { class: 'bad', text: '关闭房间', onclick: closeRoom })]),
       ]);
       card = el('div', { id: 'prsCoopCard' }, kids);

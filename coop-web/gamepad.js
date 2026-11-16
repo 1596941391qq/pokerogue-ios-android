@@ -7,14 +7,22 @@
 // (a button that was up going down, a stick leaving where it rested), and when the player has to
 // bring the buttons back by touch twice shortly after they were hidden, hiding is switched off for
 // the rest of the session.
+// The player can also switch the buttons off by hand (联机 panel on the title screen -> 屏幕按键), for a
+// controller or keyboard this script does not notice. That choice is kept (localStorage 'prs-keys-off');
+// while it is on, a small 「按键」 tag stays at the left edge and brings the buttons back when touched.
 (function () {
   'use strict';
   var hidden = false, timer = null, off = false;
+  var manual = false, chip = null; // switched off by hand
+  try { manual = localStorage.getItem('prs-keys-off') === '1'; } catch (e) {}
   var last = {};          // pad index -> { b: [pressed...], a: [axis values...] } from the previous poll
   var hiddenAt = 0, shownAt = 0, fights = 0;
   var FAKE = /uinput|fingerprint|fpc|goodix|gf_|sensor|accel|gyro|touch|stylus|pen|keypad|gpio|pwrkey|power|hall|headset|jack|virtual/i;
   var css = document.createElement('style');
   css.textContent = 'body.prs-pad > #touchControls{display:none !important}' +
+    '#prsKeysChip{position:fixed;left:max(4px,env(safe-area-inset-left));top:50%;transform:translateY(-50%);z-index:2147483000;padding:10px 6px;' +
+    'border-radius:9px;background:rgba(43,38,51,.55);color:rgba(241,238,245,.8);border:1px solid rgba(255,255,255,.25);' +
+    'font:11px/1.2 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;writing-mode:vertical-rl;letter-spacing:2px}' +
     '@media (pointer: coarse){body.prs-pad #app{align-items:center !important}' +
     'body.prs-pad #app > div:first-child{transform-origin:center !important}}';
   (document.head || document.documentElement).appendChild(css);
@@ -45,12 +53,33 @@
     for (i = 0; i < now.a.length; i++) if (Math.abs(now.a[i]) > 0.6 && Math.abs(now.a[i] - (prev.a[i] || 0)) > 0.3) act = true;
     return act;
   }
+  // the class follows both reasons to hide: a controller in use, or the player's own switch
+  function apply() {
+    if (!document.body) return;
+    var want = hidden || manual;
+    if (document.body.classList.contains('prs-pad') !== want) {
+      document.body.classList.toggle('prs-pad', want);
+      window.dispatchEvent(new Event('resize')); // the game re-fits its canvas
+    }
+    if (manual && !chip) {
+      chip = document.createElement('div');
+      chip.id = 'prsKeysChip'; chip.textContent = '按键';
+      ['touchstart', 'touchend', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click'].forEach(function (t) {
+        chip.addEventListener(t, function (ev) { ev.stopPropagation(); if (t === 'click') setManual(false); });
+      });
+      document.body.appendChild(chip);
+    } else if (!manual && chip) { chip.remove(); chip = null; }
+  }
   function set(hide) {
     if (hide === hidden || !document.body) return;
     hidden = hide;
     if (hide) hiddenAt = Date.now(); else shownAt = Date.now();
-    document.body.classList.toggle('prs-pad', hide);
-    window.dispatchEvent(new Event('resize')); // the game re-fits its canvas
+    apply();
+  }
+  function setManual(on) {
+    manual = !!on;
+    try { localStorage.setItem('prs-keys-off', manual ? '1' : '0'); } catch (e) {}
+    apply();
   }
   function watch() {
     var list = pads(), act = false;
@@ -67,5 +96,6 @@
     if (Date.now() - hiddenAt < 10000 && ++fights >= 2) { off = true; if (timer) { clearInterval(timer); timer = null; } }
     set(false);
   }, true);
-  window.PRS_PAD = { hidden: function () { return hidden; }, off: function () { return off; }, set: set };
+  window.PRS_PAD = { hidden: function () { return hidden; }, off: function () { return off; }, set: set, manual: function () { return manual; }, setManual: setManual };
+  if (manual) { if (document.body) apply(); else document.addEventListener('DOMContentLoaded', apply); }
 })();

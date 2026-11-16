@@ -499,7 +499,8 @@
     if (pc) pc.close();
     pc = new RTCPeerConnection({ iceServers: servers });
     const q = ice = Coop.iceQueue(pc);
-    pc.onicecandidate = e => { if (e.candidate) sig.send({ type: 'ice', candidate: e.candidate.toJSON() }); };
+    gathered = {};
+    pc.onicecandidate = e => { if (e.candidate) { gathered[e.candidate.type] = (gathered[e.candidate.type] || 0) + 1; sig.send({ type: 'ice', candidate: e.candidate.toJSON() }); } };
     const mine = pc;
     pc.ontrack = e => {
       // video and the game's audio arrive as two tracks of one stream
@@ -535,11 +536,24 @@
 
   // ---- staying connected: after a drop keep asking the host for a new offer until the link is back ----
   let joined = false, hostGone = false, downSince = 0, lastTry = 0, rejoining = false, wasDown = false;
+  // tries: asks for a new offer since the link was last up; offerAt: when the newest offer arrived
+  // silent: the last ask got no offer at all (the host's game is asleep in the background, most of the time)
+  let tries = 0, offerAt = 0, silent = false;
+  // What this side saw goes to the server log, like the host's reports: without it a room that never connects
+  // shows only the host's half (11-14: rooms stuck on reconnecting, cause on the 2P side unknown).
+  let gathered = {}, lastReport = 0, saidUp = null;
+  function reportStuck(now) {
+    if (now - downSince < 20000 || now - lastReport < 60000) return;
+    lastReport = now;
+    Coop.report({ role: 'guest', room, state: 'stuck-' + (hostGone ? 'host-gone' : silent || !pc ? 'no-offer' : pc.iceConnectionState), downSec: Math.round((now - downSince) / 1000), tries, cs: pc ? pc.connectionState : null, dc: dc ? dc.readyState : null, gathered, relay: (servers || []).some(x => x.credential), device: Coop.device() });
+  }
   const linkOk = () => !!(pc && pc.connectionState === 'connected' && dc && dc.readyState === 'open');
   function linkUp() {
     if (!linkOk()) return;
     if (wasDown) { wasDown = false; send({ sync: 1 }); } // we cleared the panel in linkDown: ask for the state again
-    downSince = 0; hostGone = false;
+    const took = downSince ? Math.round((Date.now() - downSince) / 1000) : 0, asked = tries;
+    downSince = 0; hostGone = false; silent = false; tries = 0;
+    if (saidUp !== pc) { const mine = saidUp = pc; setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'connected', took, tries: asked, gathered, device: Coop.device(), ...(await Coop.stats(mine)) }); }, 3000); }
     conn(true, '已连接'); $('conn').classList.remove('re');
     if ($('v').srcObject) $('wait').style.display = 'none';
     applySound();
@@ -548,9 +562,10 @@
     if (!downSince) downSince = Date.now();
     wasDown = true;
     showPick(null); // the host rebuilds this turn's panel when we are back
-    setTurn({ turn: null, text: hostGone ? '房主离开了' : '重连中…', sub: hostGone ? '' : '1P 先替你操作' });
-    conn(false, hostGone ? '房主离开了，等他回来…' : '重连中…'); $('conn').classList.add('re');
-    $('wait').textContent = hostGone ? '房主离开了，等他回来…' : '重连中…'; $('wait').style.display = 'flex';
+    const why = hostGone ? '房主不在房间里，等他回来…' : silent ? '房主没回应，让他把游戏切回前台…' : '重连中…';
+    setTurn({ turn: null, text: hostGone ? '房主离开了' : silent ? '等房主回应…' : '重连中…', sub: hostGone || silent ? '' : '1P 先替你操作' });
+    conn(false, why); $('conn').classList.add('re');
+    $('wait').textContent = why; $('wait').style.display = 'flex';
     $('wait').style.background = 'rgba(0,0,0,.55)';
   }
   async function rejoin() { // the signaling stream itself died: open a new one (same room)
@@ -567,7 +582,8 @@
   }
   function newSignal() {
     return new Coop.Signal(room, 'guest')
-      .on('message', m => { if (m.type === 'offer') { hostGone = false; onOffer(m.sdp, m.n).catch(() => {}); } else if (m.type === 'ice') ice && ice.add(m.candidate); })
+      .on('message', m => { if (m.type === 'offer') { hostGone = false; silent = false; offerAt = Date.now(); onOffer(m.sdp, m.n).catch(() => {}); } else if (m.type === 'ice') ice && ice.add(m.candidate); })
+      .on('hello', h => { hostGone = !h.peer; })
       .on('peer-joined', () => { hostGone = false; })
       .on('peer-left', () => { hostGone = true; linkDown(); });
   }
@@ -575,10 +591,17 @@
     if (!joined || linkOk()) return;
     const now = Date.now();
     if (!downSince) downSince = now;
-    // give a fresh offer 8 s to connect, a hiccup 3 s to heal by itself, then ask again every 5 s
-    const settling = pc && ['new', 'connecting'].includes(pc.connectionState) && now - lastTry < 8000;
-    if (settling || now - downSince < 3000 || now - lastTry < 5000) return;
-    lastTry = now;
+    reportStuck(now);
+    // Asking again makes the host drop the connection it is building and start over, so asking too soon keeps a
+    // slow link from ever connecting (11-16: rooms that connected on the host and were cut 5 s later, again and
+    // again, for minutes). An offer gets 12 s from its arrival, more after each try (18, 24, 30 s); a link that
+    // was up gets 3 s to heal by itself; with no offer yet ask again after 6 s, later 9, 12, 15 s.
+    const got = offerAt >= lastTry; // the offer for the last ask has arrived
+    const alive = pc && !['failed', 'closed'].includes(pc.connectionState) && pc.iceConnectionState !== 'failed';
+    const settling = got && alive && now - offerAt < Math.min(12000 + tries * 6000, 30000);
+    const gap = got ? 5000 : Math.min(6000 + tries * 3000, 15000);
+    if (settling || now - downSince < 3000 || now - lastTry < gap) return;
+    silent = !got; lastTry = now; tries++;
     linkDown();
     if (!sig || !sig.es || sig.es.readyState === 2) rejoin();
     else sig.send({ type: 'ready' }).catch(() => rejoin());
