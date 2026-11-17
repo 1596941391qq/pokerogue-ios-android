@@ -553,7 +553,9 @@
     if (wasDown) { wasDown = false; send({ sync: 1 }); } // we cleared the panel in linkDown: ask for the state again
     const took = downSince ? Math.round((Date.now() - downSince) / 1000) : 0, asked = tries;
     downSince = 0; hostGone = false; silent = false; tries = 0;
-    if (saidUp !== pc) { const mine = saidUp = pc; setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'connected', took, tries: asked, gathered, device: Coop.device(), ...(await Coop.stats(mine)) }); }, 3000); }
+    if (saidUp !== pc) { const mine = saidUp = pc; setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'connected', took, tries: asked, gathered, device: Coop.device(), ...(await Coop.stats(mine)) }); }, 3000);
+      // 11-16: a second look after a minute of play, when the round trip has settled (relay A/B, see signal.js armOf)
+      setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'steady', device: Coop.device(), ...(await Coop.stats(mine)) }); }, 60000); }
     conn(true, '已连接'); $('conn').classList.remove('re');
     if ($('v').srcObject) $('wait').style.display = 'none';
     applySound();

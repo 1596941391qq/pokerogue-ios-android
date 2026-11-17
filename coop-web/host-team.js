@@ -695,8 +695,15 @@ window.CoopTeam = (function () {
     if (!isCopy && !rerollCount) {
       const wave = (scene().currentBattle || {}).waveIndex || 0, picker = wave % 2 ? 'p2' : 'p1';
       if (!custom) ph.__coop = { round: 1, picker }; // the normal reward after a battle
-      // a set list (fixed battles, mystery encounters, the shop-only screen): one pick, no second round
-      else { ph.__coop = { round: 1, picker, single: true }; log('rewards: special, one pick by ' + label(picker)); }
+      else {
+        // A set list. After a fixed trainer battle (the rival, a team boss...) both players pick: the second one
+        // from what the first left, and with the shop, like after any other battle (two reports 11-16: 打完艾薇,
+        // 只有一个人能选). Mystery encounters and the shop-only screen stay one pick, no second round.
+        let event = true;
+        try { const b = scene().currentBattle; event = !b || (typeof b.isBattleMysteryEncounter === 'function' ? b.isBattleMysteryEncounter() : !!b.mysteryEncounter); } catch {}
+        if (event) { ph.__coop = { round: 1, picker, single: true }; log('rewards: special, one pick by ' + label(picker)); }
+        else { ph.__coop = { round: 1, picker }; log('rewards: set list after a fixed battle, ' + label(picker) + ' picks first'); }
+      }
     }
   }
   function hookPhases(s) {

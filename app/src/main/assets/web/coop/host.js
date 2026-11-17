@@ -99,13 +99,22 @@ window.CoopLink = (function () {
   // late on a bad network the game saw a held key and repeated it, "one press jumps five or six".) Holding a
   // button to repeat is done by the guest page, which sends a press every so often while the button is held.
   const TAP_MS = 80, HOST_V = 2; // HOST_V goes to the guest so its page knows the host makes taps
+  // 能力 (C) and 信息 (V) show a panel for as long as the key is down. Tapping them over and over, which is
+  // what a held button on the guest page turns into, made that panel flash (player report 11-16). For these
+  // two the key stays down while presses keep coming and comes up LOOK_MS after the last one. The guest page
+  // sends its first repeat 490 ms after the press (380 + 110) and then one every 110 ms; 600 leaves room for a
+  // late one, so a hold is one unbroken key press.
+  const LOOK = new Set(['stats', 'tera']), LOOK_MS = 600;
   const held = new Set(), upTimer = {};
   function release(btn) { clearTimeout(upTimer[btn]); delete upTimer[btn]; if (held.delete(btn)) press(btn, false); }
   function guestPress(btn) {
+    const look = LOOK.has(btn);
+    if (look && held.has(btn)) { clearTimeout(upTimer[btn]); upTimer[btn] = setTimeout(() => release(btn), LOOK_MS); return; }
     if (held.has(btn)) release(btn);
     press(btn, true); held.add(btn);
-    upTimer[btn] = setTimeout(() => release(btn), TAP_MS);
+    upTimer[btn] = setTimeout(() => release(btn), look ? LOOK_MS : TAP_MS);
   }
+  CoopLink._guestPress = guestPress; CoopLink._guestRelease = btn => { if (LOOK.has(btn)) release(btn); }; // for tests
   function dropped(why) {
     if (!CoopLink.online()) return;
     log('guest link down: ' + why);
@@ -149,6 +158,7 @@ window.CoopLink = (function () {
       try { m = JSON.parse(e.data); } catch { return; }
       // a press can be refused by the turn rules (host-game.js)
       if (m.btn && m.down && CoopLink._allow(m.btn, true)) guestPress(m.btn); // the release is ours (TAP_MS), the guest's is ignored
+      else if (m.btn && m.down === false && LOOK.has(m.btn)) release(m.btn); // except for the two look keys: the panel goes when the finger lifts
       if (m.ping) dc.send(JSON.stringify({ pong: m.ping }));
       CoopLink._msg(m);
     };

@@ -45,6 +45,7 @@ window.Coop = (function () {
     };
   }
 
+  const NEAR_RELAY_IP = '103.70.77.178'; // the near coturn (P302's Hong Kong box)
   async function stats(pc) {
     const st = await pc.getStats(), by = {};
     st.forEach(s => { by[s.id] = s; });
@@ -56,8 +57,26 @@ window.Coop = (function () {
       if (s.type === 'outbound-rtp' && s.kind === 'video') outV = s;
     });
     const l = pair ? by[pair.localCandidateId] || {} : {}, r = pair ? by[pair.remoteCandidateId] || {} : {};
+    // 11-16: which relay carries the call (hk = the near coturn, cf = Cloudflare) and how this side reaches it
+    // (udp / tcp / tls), plus the round trip of every candidate pair that answered, keyed the same way, so one
+    // report compares the relays for the same two players.
+    const relayOf = c => !c || c.candidateType !== 'relay' ? null
+      : String(c.url || '').includes(NEAR_RELAY_IP) || (c.address || c.ip) === NEAR_RELAY_IP ? 'hk' : 'cf';
+    const keyOf = (a, b) => (relayOf(a) ? relayOf(a) + '-' + (a.relayProtocol || '?') : a.candidateType || '?') + '>' + (relayOf(b) || b.candidateType || '?');
+    const alt = {};
+    st.forEach(s => {
+      if (s.type !== 'candidate-pair' || !s.responsesReceived || !s.totalRoundTripTime) return;
+      const k = keyOf(by[s.localCandidateId] || {}, by[s.remoteCandidateId] || {}), ms = Math.round(s.totalRoundTripTime / s.responsesReceived * 1000);
+      if (!(k in alt) || ms < alt[k]) alt[k] = ms;
+    });
     return {
       path: pair ? `${l.candidateType || '?'}(${l.protocol || '?'}) -> ${r.candidateType || '?'}` : null,
+      via: pair ? relayOf(l) || relayOf(r) || 'direct' : undefined, viaProto: l.candidateType === 'relay' ? l.relayProtocol : undefined,
+      alt: Object.keys(alt).length ? alt : undefined,
+      // 11-16: public IPv6 candidates on each side ([mine, peer's]). Host addresses are hidden behind mDNS names,
+      // so srflx/prflx count too. With IPv6 on both ends a direct path is often possible where IPv4 behind carrier
+      // NAT is not, so this says how many relayed rooms could go direct.
+      v6: [0, 0].map((_, i) => { let n = 0; st.forEach(c => { if (c.type === (i ? 'remote-candidate' : 'local-candidate') && c.candidateType !== 'relay' && String(c.address || c.ip || '').includes(':')) n++; }); return n; }),
       rttMs: pair && pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : null,
       inFps: inV ? inV.framesPerSecond : undefined, inSize: inV && inV.frameWidth ? `${inV.frameWidth}x${inV.frameHeight}` : undefined,
       inKB: inV ? Math.round(inV.bytesReceived / 1024) : undefined, lost: inV ? inV.packetsLost : undefined,
