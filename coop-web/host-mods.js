@@ -1,34 +1,53 @@
 // Co-op host, optional part: mods (民间创意工坊). Injected after host-team.js / host-game.js, followed by
-// mods-bundle.js (every mod of the package: mods/<id>/mod.json + mod.js, packed by tools/build-mods.mjs).
-// - A mod registers items and handlers through a small interface (docs: workshop-repo/docs/MOD-API.md); it never touches the
-//   game's own classes. This file is the only place that knows where the game is hooked.
+// mods-bundle.js (every mod of the package: mods/<id>/mod.json + mod.js + icons/*.png, packed by tools/build-mods.mjs).
+// The shipped host-mods.js is this file followed by the engine extensions (engine/ext-*.js), put together by
+// tools/assemble.mjs. 接口版本 2; mods written for 接口版本 1 load and behave as before.
+// - A mod registers items and handlers through a small interface (docs/MOD-API.md); it never touches the
+//   game's own classes. This file and the extensions (engine/EXT.md) are the only places that know where
+//   the game is hooked.
 // - Mods only run in a co-op room (window.CoopTeam is there) and only while switched on. The switch is per
 //   device (localStorage coop-mods-v1). With every mod off, no game method is wrapped except the save reader
 //   and writer below, which then pass everything through unchanged.
-// - Mod items are NOT game items. Who holds what is kept here, by Pokémon id, and written into the session
-//   save as one extra block "coopMods" that the game itself ignores (same idea as host-team.js's "coop"
-//   block), plus a copy on this device by run seed. So a save made with mods loads in a build without them
-//   (the block is just dropped), and a block of a mod that is off or missing is carried along untouched.
+// - Mod items are NOT game items. A 携带道具 (kind 'held') is on one Pokémon, a 被动增益 (kind 'passive') is
+//   in the team bag; both may stack up to the item's max. All of it is kept here and written into the
+//   session save as one extra block "coopMods" that the game itself ignores (same idea as host-team.js's
+//   "coop" block), plus a copy on this device by run seed. So a save made with mods loads in a build without
+//   them (the block is just dropped), and a block of a mod that is off or missing is carried along untouched.
+//   Block v2 = { v: 2, held: { pokemonId: { itemKey: { n, s } } }, bag: { itemKey: { n, s } } } (n: how many,
+//   s: the item's state). Block v1 = { v: 1, held: { pokemonId: { itemKey: state } } } is still read.
 // - Rewards: on the normal 5 选 2 reward screen a slot of the same rarity may be replaced by a mod item (as if
-//   the item were one more entry in that rarity's pool). Picking it asks which of your Pokémon holds it.
-// - Shown: item icons next to each player's Pokémon in battle, names on the party screen, a message when an
-//   item triggers. CoopMods.openPanel() is the list of mods with their switches.
+//   the item were one more entry in that rarity's pool); an extension may switch that off (X.cfg.normalOffer)
+//   and offer mod items its own way. Picking a held item asks which of your Pokémon holds it; a passive
+//   item goes straight into the bag.
+// - Icons: a mod may bring its own 32x32 PNGs; they are added to the game's item texture as extra frames, so
+//   the reward screen, the plates below and anything else that draws an item by frame name shows them.
+// - Shown: item icons next to each player's Pokémon in battle (×n for a stack), names on the party screen, a
+//   message when an item triggers. CoopMods.openPanel() is the list of mods with their switches and the bag.
 (function () {
   if (window.CoopMods) return; // injected twice (from the menu before a room, then with the room)
-  const API_VERSION = 1;
+  const API_VERSION = 2;
   const log = (...a) => console.log('COOP mods', ...a.map(x => (typeof x === 'string' ? x : JSON.stringify(x))));
   const scene = () => window.PRS_SCENE;
   const uiMode = () => { const t = document.getElementById('touchControls'); return (t && t.dataset.uiMode) || null; };
   const PREF_KEY = 'coop-mods-v1', HELD_KEY = 'coop-mods-held-v1', SAVE_KEY = 'coopMods', HELD_KEPT = 30;
   const TIER = { COMMON: 0, GREAT: 1, ULTRA: 2, ROGUE: 3, MASTER: 4 };
-  const TIER_ZH = ['白色', '蓝色', '金色', '红色', '紫色'], TIER_CSS = ['#d8d8d8', '#6aa9ff', '#f5c84c', '#ff6a5c', '#c58cff'];
+  // what a rarity is called for mod items (issue #2); the colours are the game's own (white, blue, gold, red, purple)
+  const TIER_ZH = ['普通道具', '超级道具', '高级道具', '肉鸽道具', '大师道具'], TIER_CSS = ['#d8d8d8', '#6aa9ff', '#f5c84c', '#ff6a5c', '#c58cff'];
+  const KIND_ZH = { held: '携带道具', passive: '被动增益' };
   // The game picks a reward in two steps: a rarity, then one entry of that rarity's pool by weight. A mod item
   // is treated as one more entry: chance per slot of its rarity = weight / (total + the mod weights there).
   // total: about what the game's own pool adds up to in a normal run (pokerogue 1.12 pools); cap: the largest
   // weight a mod item may have, so it never shows up more often than the game's own held items of that rarity.
   const POOL = [{ total: 250, cap: 4 }, { total: 200, cap: 4 }, { total: 170, cap: 9 }, { total: 90, cap: 5 }, { total: 80, cap: 14 }];
-  const EVENTS = ['damageCalc', 'beforeDamage', 'moveSelect', 'status', 'statChange', 'faint', 'turnStart', 'turnEnd', 'give', 'remove'];
+  const EVENTS = ['damageCalc', 'beforeDamage', 'moveSelect', 'status', 'statChange', 'faint', 'turnStart', 'turnEnd', 'give', 'remove',
+    'heal', 'moveUsed', 'battleStart', 'battleEnd']; // the last four are new in 接口版本 2; extensions add more (X.addEvent)
   const STATUS = [null, 'poison', 'toxic', 'paralysis', 'sleep', 'freeze', 'burn'], STATUS_ZH = { poison: '中毒', toxic: '剧毒', paralysis: '麻痹', sleep: '睡眠', freeze: '冰冻', burn: '灼伤' };
+  // stats that have stages in battle: name <-> the game's Stat enum (HP is 0 and has no stage)
+  const STAT = { atk: 1, def: 2, spatk: 3, spdef: 4, spd: 5, acc: 6, eva: 7 };
+  const STAT_NAMES = [null, 'atk', 'def', 'spatk', 'spdef', 'spd', 'acc', 'eva'], STAT_ZH = [null, '攻击', '防御', '特攻', '特防', '速度', '命中率', '闪避率'];
+  const statNum = x => (typeof x === 'number' ? (STAT_NAMES[x] ? x : 0) : STAT[x] || 0);
+  const statApi = Object.freeze({ ...STAT, names: Object.freeze(STAT_NAMES.slice(1)), battle: Object.freeze(['atk', 'def', 'spatk', 'spdef', 'spd']),
+    name: x => STAT_NAMES[statNum(x)] || null, zh: x => STAT_ZH[statNum(x)] || '', num: statNum });
 
   // ---- the mods of this package, and which are switched on ----
   const mods = {}, order = [], items = {}; // items: 'modId:itemId' -> definition
@@ -38,12 +57,14 @@
   const anyOn = () => order.some(isOn);
   const active = () => !!(window.CoopTeam && scene() && scene().phaseManager); // a co-op room is open
   const partyOf = s => (s && s.getPlayerParty && s.getPlayerParty()) || []; // not there yet while the game boots
+  const switchFns = [];
   function setOn(id, on) {
     if (!mods[id]) return false;
     prefs.on[id] = !!on;
     try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch {}
     log('mod ' + id + ' switched ' + (on ? 'on' : 'off'));
     ov.sig = '';
+    for (const fn of switchFns) { try { fn(id, isOn(id)); } catch (e) { log('switch handler error', String(e)); } }
     return isOn(id);
   }
   const problems = {};
@@ -54,7 +75,7 @@
   function manifest(m) {
     if (!m || typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9-]{2,39}$/.test(m.id)) { log('manifest refused: bad id', m && m.id); return false; }
     if (mods[m.id]) return false;
-    mods[m.id] = { id: m.id, manifest: m, items: [], on: {}, phase: [], ok: false, error: null };
+    mods[m.id] = { id: m.id, manifest: m, items: [], on: {}, phase: [], ok: false, error: null, v1: !(Number(m.api) >= 2), once: {} };
     order.push(m.id);
     return true;
   }
@@ -63,9 +84,10 @@
     if (!mod) { log('mod ' + id + ': mod.json missing from the bundle, not loaded'); return; }
     if (mod.ok || mod.error) return;
     try {
+      if (Number(mod.manifest.api) > API_VERSION) throw new Error('needs interface v' + mod.manifest.api + ', this game has v' + API_VERSION);
       setup(makeApi(mod));
       mod.ok = true;
-      log('mod ' + id + ' v' + mod.manifest.version + ' loaded (' + mod.items.length + ' items), ' + (isOn(id) ? 'on' : 'off'));
+      log('mod ' + id + ' v' + mod.manifest.version + ' loaded (' + mod.items.length + ' items, interface v' + (mod.v1 ? 1 : 2) + '), ' + (isOn(id) ? 'on' : 'off'));
     } catch (e) {
       mod.error = String((e && e.stack) || e);
       mod.items.forEach(k => { delete items[k]; });
@@ -74,56 +96,172 @@
     }
   }
 
-  // ---- who holds which mod item: Pokémon id -> { 'modId:itemId': state } ----
-  let held = {}, heldSeed = null;
-  const fromSave = {}; // run seed -> the coopMods block of a save the game has read (null: that save has none)
-  const fieldStates = new WeakMap(); // a Pokémon's summonData (a new object every time it enters the field) -> {}
-  const heldOf = p => (p && held[p.id]) || null;
-  const holds = (p, key) => { const h = heldOf(p); return !!(h && h[key]); };
-  // what a Pokémon holds that is shown and counted: items of mods that are on
-  const shownItems = p => Object.keys(heldOf(p) || {}).filter(k => items[k] && isOn(items[k].mod)).map(k => ({ key: k, def: items[k], state: held[p.id][k] }));
-  function give(p, key, state) {
-    if (!p || !items[key]) return false;
-    (held[p.id] = held[p.id] || {})[key] = state && typeof state === 'object' ? state : {};
+  // ---- a mod's own icons: PNGs of at most 32x32 packed into the bundle as data URIs ----
+  // They become extra frames of the game's 'items' texture ('coopmod/<mod id>/<file name>'), so everything
+  // that draws an item by frame name (the reward screen, its name box, the plates here) can show them.
+  const ICON = 32, iconData = {}; // 'modId/name' -> { uri, img, ok }
+  const iconReg = { tex: null, done: new Set(), n: 0 };
+  function icons(modId, map) {
+    if (!mods[modId] || !map || typeof map !== 'object') return 0;
+    let n = 0;
+    for (const name of Object.keys(map)) {
+      const uri = map[name];
+      if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(name) || typeof uri !== 'string' || !uri.startsWith('data:image/png;base64,')) { log('mod ' + modId + ': icon ' + name + ' refused'); continue; }
+      const d = iconData[modId + '/' + name] = { uri, img: new Image(), ok: false };
+      d.img.onload = () => { d.ok = d.img.width > 0 && d.img.height > 0; iconReg.n++; };
+      d.img.onerror = () => { log('mod ' + modId + ': icon ' + name + ' is not a picture the browser can read'); };
+      d.img.src = uri;
+      n++;
+    }
+    return n;
+  }
+  function registerIcons(s) {
+    const tm = s.textures;
+    if (!tm || !tm.exists('items')) return;
+    const tex = tm.get('items');
+    if (tex !== iconReg.tex) { iconReg.tex = tex; iconReg.done = new Set(); iconReg.seen = -1; } // (the game made its texture anew)
+    if (iconReg.seen === iconReg.n) return; // nothing decoded since the last look
+    iconReg.seen = iconReg.n;
+    const todo = Object.keys(iconData).filter(k => iconData[k].ok && !iconReg.done.has(k));
+    if (!todo.length) return;
+    // one sheet for this batch: 32x32 cells, each icon centred in its cell (the game's item frames are 32x32)
+    const cols = Math.min(todo.length, 16), sheet = document.createElement('canvas');
+    sheet.width = cols * ICON; sheet.height = Math.ceil(todo.length / cols) * ICON;
+    const g = sheet.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    todo.forEach((k, i) => {
+      const img = iconData[k].img, f = Math.min(1, ICON / img.width, ICON / img.height);
+      const w = Math.max(1, Math.round(img.width * f)), h = Math.max(1, Math.round(img.height * f));
+      g.drawImage(img, (i % cols) * ICON + Math.floor((ICON - w) / 2), Math.floor(i / cols) * ICON + Math.floor((ICON - h) / 2), w, h);
+    });
+    const Source = tex.source[0].constructor; // Phaser.Textures.TextureSource
+    tex.source.push(new Source(tex, sheet, sheet.width, sheet.height));
+    const si = tex.source.length - 1;
+    todo.forEach((k, i) => { tex.add('coopmod/' + k, si, (i % cols) * ICON, Math.floor(i / cols) * ICON, ICON, ICON); iconReg.done.add(k); });
     ov.sig = '';
-    log('item ' + key + ' -> ' + nameOf(p));
-    emit('give', { pokemon: p, item: key });
+    log('icons: ' + todo.length + ' of the mods\' own added to the item texture');
+  }
+  // the frame of the 'items' texture to draw for an item, right now
+  const frameOf = it => (it.custom ? (iconReg.done.has(it.custom) ? 'coopmod/' + it.custom : it.fallback) : it.icon);
+
+  // ---- who has which mod item ----
+  // held: Pokémon id -> { 'modId:itemId': { n, s } }; bag (passive items, the whole team's): 'modId:itemId' -> { n, s }
+  let held = {}, bag = {}, heldSeed = null;
+  const runMark = { wave: 0, time: 0 }; // where the run was when last looked at (to notice it starting over)
+  const fromSave = {}; // run seed -> { block, ids } of a save the game has read (block null: that save has none)
+  const fieldStates = new WeakMap(); // a Pokémon's summonData (a new object every time it enters the field) -> {}
+  const entryOf = (p, key) => (p && held[p.id] && held[p.id][key]) || null;
+  const countOf = (p, key) => { const e = entryOf(p, key); return e ? e.n : 0; };
+  const holds = (p, key) => countOf(p, key) > 0;
+  const bagCount = key => (bag[key] ? bag[key].n : 0);
+  const itemOn = key => !!items[key] && isOn(items[key].mod);
+  // how many of a held item this Pokémon may hold: the item's max, unless an extension (X.onMax) says otherwise
+  // for this Pokémon (异次元树果袋 raises the limit of the items that count as berries). Passive items: it.max.
+  const maxFns = [];
+  function maxOf(p, key) {
+    const it = items[key];
+    if (!it) return 0;
+    let max = it.max;
+    if (it.kind === 'passive' || !p || !maxFns.length || !isOn(it.mod)) return max;
+    for (const fn of maxFns) { const r = guard('item max', () => fn(p, key, max)); if (typeof r === 'number' && isFinite(r)) max = Math.max(1, Math.min(Math.floor(r), 999)); }
+    return max;
+  }
+  // what a Pokémon holds that is shown and counted: items of mods that are on
+  const shownItems = p => Object.keys((p && held[p.id]) || {}).filter(itemOn).map(k => ({ key: k, def: items[k], state: held[p.id][k].s, count: held[p.id][k].n }));
+  const shownBag = () => Object.keys(bag).filter(itemOn).map(k => ({ key: k, def: items[k], state: bag[k].s, count: bag[k].n }));
+  // a few words an item says about its own state (def.note(state, count)), for the lists: '' when it has none
+  const noteOf = it => { if (!it.def.note) return ''; const t = guard('item note ' + it.key, () => it.def.note(it.state, it.count), ''); return typeof t === 'string' && t ? t.slice(0, 24) : ''; };
+  const plain = state => (state && typeof state === 'object' && !Array.isArray(state) ? state : {});
+  // one more of an item. Held: for this Pokémon, up to the item's max (false when it has max already).
+  // Passive: p is ignored, the item goes into the team bag. from: 'reward' when picked on the reward screen.
+  function give(p, key, state, from) {
+    const it = items[key];
+    if (!it) return false;
+    let e;
+    if (it.kind === 'passive') {
+      e = bag[key];
+      if (e && e.n >= it.max) return false;
+      if (e) e.n++; else e = bag[key] = { n: 1, s: plain(state) };
+      p = null;
+    } else {
+      if (!p) return false;
+      e = entryOf(p, key);
+      if (e && it.v1) e.s = plain(state); // 接口版本 1: giving again starts the item over
+      else if (e && e.n >= maxOf(p, key)) return false;
+      else if (e) e.n++;
+      else e = (held[p.id] = held[p.id] || {})[key] = { n: 1, s: plain(state) };
+    }
+    ov.sig = '';
+    log('item ' + key + ' -> ' + (p ? nameOf(p) : 'the team bag') + (e.n > 1 ? ' (×' + e.n + ')' : ''));
+    emit('give', { pokemon: p, item: key, count: e.n, from: from || 'mod' });
     return true;
   }
-  function remove(p, key) {
-    if (!holds(p, key)) return false;
-    delete held[p.id][key];
-    if (!Object.keys(held[p.id]).length) delete held[p.id];
+  // n of them away (all of them when n is not given); the last one takes the item and its state with it
+  function take(p, key, n) {
+    const it = items[key], passive = !!it && it.kind === 'passive';
+    const e = passive ? bag[key] : entryOf(p, key);
+    if (!e) return false;
+    const all = n == null || n === Infinity;
+    n = all ? e.n : Math.max(1, Math.floor(Number(n) || 1));
+    e.n -= Math.min(n, e.n);
+    if (e.n <= 0) {
+      if (passive) delete bag[key];
+      else { delete held[p.id][key]; if (!Object.keys(held[p.id]).length) delete held[p.id]; }
+    }
     ov.sig = '';
-    log('item ' + key + ' gone from ' + nameOf(p));
-    emit('remove', { pokemon: p, item: key });
+    log('item ' + key + (e.n > 0 ? ': ' + e.n + ' left with ' : ' gone from ') + (passive ? 'the team bag' : nameOf(p)));
+    emit('remove', { pokemon: passive ? null : p, item: key, left: Math.max(0, e.n) });
     return true;
+  }
+  const remove = (p, key) => take(p, key, null);
+  // is there room for one more of this item? Held: on any Pokémon in the party (who: only that player's own)
+  function canTake(key, who) {
+    const it = items[key];
+    if (!it) return false;
+    if (it.kind === 'passive') return bagCount(key) < it.max;
+    return partyOf(scene()).some(p => (!who || !window.CoopTeam || CoopTeam.ownerOf(p) === who) && countOf(p, key) < maxOf(p, key));
   }
   const kept = () => { try { return JSON.parse(localStorage.getItem(HELD_KEY) || '{}') || {}; } catch { return {}; } };
-  function keep(seed, block) { // this device's copy, for a save rewritten by a build without mods
+  function keep(seed, block, ids) { // this device's copy, for a save rewritten by a build without mods
     const all = kept();
-    if (block) all[seed] = { block, t: Date.now() }; else if (all[seed]) delete all[seed]; else return;
-    const ids = Object.keys(all).sort((a, b) => (all[a].t || 0) - (all[b].t || 0));
-    ids.slice(0, Math.max(0, ids.length - HELD_KEPT)).forEach(id => { delete all[id]; });
+    if (block) all[seed] = { block, ids, t: Date.now() }; else if (all[seed]) delete all[seed]; else return;
+    const seeds = Object.keys(all).sort((a, b) => (all[a].t || 0) - (all[b].t || 0));
+    seeds.slice(0, Math.max(0, seeds.length - HELD_KEPT)).forEach(id => { delete all[id]; });
     try { localStorage.setItem(HELD_KEY, JSON.stringify(all)); } catch {}
   }
-  const validBlock = b => !!(b && b.v === 1 && b.held && typeof b.held === 'object' && !Array.isArray(b.held));
+  const isObj = x => !!x && typeof x === 'object' && !Array.isArray(x);
+  const validBlock = b => !!(b && (b.v === 1 || b.v === 2) && isObj(b.held) && (b.v === 1 || b.bag == null || isObj(b.bag)));
+  // a block of either version -> { held, bag } in today's shape (a copy; anything malformed is left out)
+  function readBlock(b) {
+    const out = { held: {}, bag: {} };
+    const entry = x => (b.v === 1 ? (isObj(x) ? { n: 1, s: x } : null) : isObj(x) && x.n >= 1 ? { n: Math.floor(x.n), s: plain(x.s) } : null);
+    for (const id of Object.keys(b.held)) {
+      if (!isObj(b.held[id])) continue;
+      for (const k of Object.keys(b.held[id])) { const e = entry(b.held[id][k]); if (e) (out.held[id] = out.held[id] || {})[k] = e; }
+    }
+    if (b.v === 2 && isObj(b.bag)) for (const k of Object.keys(b.bag)) { const e = entry(b.bag[k]); if (e) out.bag[k] = e; }
+    return JSON.parse(JSON.stringify(out));
+  }
   function loadFor(seed) {
     heldSeed = seed;
-    const sv = fromSave[seed], dev = (kept()[seed] || {}).block;
-    const b = validBlock(sv) ? sv : validBlock(dev) ? dev : null;
-    held = {};
-    if (b) for (const id of Object.keys(b.held)) { const h = b.held[id]; if (h && typeof h === 'object' && !Array.isArray(h)) held[id] = JSON.parse(JSON.stringify(h)); }
+    const s = scene(), now = new Set(partyOf(s).map(p => String(p.id)));
+    // a block belongs to this run when the party it was saved with shares a Pokémon with today's (a new run on
+    // the same seed, a daily run started again, has all new Pokémon: nothing is carried into it)
+    const mine = c => !!(c && validBlock(c.block) && (!Array.isArray(c.ids) ? !(c.block.bag && Object.keys(c.block.bag).length) : c.ids.some(id => now.has(String(id)))));
+    const sv = fromSave[seed], dev = kept()[seed];
+    const c = mine(sv) ? sv : mine(dev) ? dev : null;
+    const r = c ? readBlock(c.block) : { held: {}, bag: {} };
+    held = r.held; bag = r.bag;
     ov.sig = '';
-    const n = Object.keys(held).length;
-    const sig = seed + JSON.stringify(held);
-    if (n && sig !== loadFor.sig) log('held items restored for ' + n + ' Pokémon, from ' + (b === sv ? 'the save' : 'this device'));
+    const n = Object.keys(held).length, m = Object.keys(bag).length;
+    const sig = seed + JSON.stringify([held, bag]);
+    if ((n || m) && sig !== loadFor.sig) log('items restored (block v' + c.block.v + ', from ' + (c === sv ? 'the save' : 'this device') + '): held by ' + n + ' Pokémon, ' + m + ' kind(s) in the team bag');
     loadFor.sig = sig;
   }
-  function exportHeld(s) {
+  function exportBlock(s) {
     const ids = new Set(partyOf(s).map(p => String(p.id))), out = {};
     for (const id of Object.keys(held)) if (ids.has(id) && held[id] && Object.keys(held[id]).length) out[id] = held[id];
-    return Object.keys(out).length ? { v: 1, held: out } : null;
+    return Object.keys(out).length || Object.keys(bag).length ? { v: 2, held: out, bag } : null;
   }
   function hookSave(s) {
     const gd = s.gameData;
@@ -135,9 +273,9 @@
       try {
         if (r && typeof r === 'object' && r.seed) {
           if (r.seed !== heldSeed) loadFor(r.seed);
-          const block = exportHeld(s);
+          const block = exportBlock(s);
           if (block) r[SAVE_KEY] = block; // a key the game's save reader does not know and leaves alone
-          keep(r.seed, block);
+          keep(r.seed, block, partyOf(s).map(p => p.id));
         }
       } catch (e) { log('save error', String(e)); }
       return r;
@@ -145,7 +283,7 @@
     const parse = gd.parseSessionData;
     if (typeof parse === 'function') gd.parseSessionData = function () {
       const r = parse.apply(this, arguments);
-      try { if (r && r.seed) fromSave[r.seed] = validBlock(r[SAVE_KEY]) ? r[SAVE_KEY] : null; } catch {}
+      try { if (r && r.seed) fromSave[r.seed] = { block: validBlock(r[SAVE_KEY]) ? r[SAVE_KEY] : null, ids: Array.isArray(r.party) ? r.party.map(p => p && p.id) : null }; } catch {}
       return r;
     };
     const load = gd.loadSession;
@@ -154,7 +292,7 @@
       Promise.resolve(r).then(() => { heldSeed = null; }, () => {}); // this run again from its save
       return r;
     };
-    log('save: held items go into the "' + SAVE_KEY + '" block');
+    log('save: mod items go into the "' + SAVE_KEY + '" block (v2)');
   }
 
   // ---- events ----
@@ -165,6 +303,14 @@
     for (const [m, fn] of listeners(type)) { try { const r = fn(ev); if (r !== undefined) last = r; } catch (e) { problem(m, type, e); } }
     return last;
   }
+  const battle = { on: null, wave: -1 }; // on: between the encounter and the end of the battle (null: not seen yet)
+  let moveHits = []; // { attacker, target, damage }: move hits since the attacker's move began
+  // MovePhase.end queues the MoveEndPhase with the user's battler index. When the user has fainted meanwhile (its
+  // own recoil) and the game has moved its teammate into that field slot, the index names the teammate. So the
+  // user is remembered when its MovePhase ends: { mon, bi }.
+  let movers = [];
+  let healCtx = null; // the tag of the B.heal that is being carried out right now
+  const phaseNow = () => { try { return scene().phaseManager.getCurrentPhase().phaseName; } catch { return null; } };
   function phaseEvent(when, ph) {
     const name = ph && ph.phaseName;
     if (!name) return;
@@ -173,14 +319,96 @@
       if (!isOn(id)) continue;
       for (const h of m.phase) if (h.name === name && h.when === when) { try { h.fn(ph); } catch (e) { problem(m, name + ' ' + when, e); } }
     }
-    if (when !== 'start') return;
-    if (name === 'TurnStartPhase') emit('turnStart', {});
+    if (when !== 'start') {
+      if (name === 'MovePhase' && ph.pokemon) { let bi = -1; try { bi = ph.pokemon.getBattlerIndex(); } catch {} if (movers.length > 12) movers = []; movers.push({ mon: ph.pokemon, bi, moveId: ph.move && ph.move.moveId != null ? ph.move.moveId : null }); }
+      return;
+    }
+    if (name === 'TurnInitPhase') {
+      movers = [];
+      const b = scene().currentBattle, w = b ? b.waveIndex : -1;
+      if (w !== battle.wave) { battle.wave = w; moveHits = []; emit('battleStart', { wave: w, turn: b ? b.turn : 0 }); }
+    } else if (name === 'TurnStartPhase') { moveHits = []; markTurn(); emit('turnStart', {}); }
     else if (name === 'TurnEndPhase') emit('turnEnd', {});
+    else if (name === 'BattleEndPhase') emit('battleEnd', { wave: B.wave(), victory: ph.isVictory !== false });
     else if (name === 'FaintPhase') { let p = null; try { p = ph.getPokemon(); } catch {} if (p && p.hp <= 0) emit('faint', { pokemon: p }); }
+    else if (name === 'MoveEndPhase') {
+      let p = null; try { p = ph.getPokemon(); } catch {}
+      let used = null; // the move the MovePhase was for (a Pokémon that has left the field has no move history any more)
+      for (let i = movers.length - 1; i >= 0; i--) if (movers[i].bi === ph.battlerIndex) { p = movers[i].mon; used = movers[i].moveId; movers.splice(i, 1); break; }
+      if (!p) return;
+      const hits = moveHits.filter(h => h.attacker === p);
+      moveHits = moveHits.filter(h => h.attacker !== p);
+      if (!has('moveUsed')) return;
+      let last = null; try { last = p.getLastXMoves(1)[0] || null; } catch {}
+      emit('moveUsed', { pokemon: p, moveId: last ? last.move : used, targets: last && last.targets ? last.targets.slice() : hits.map(h => { try { return h.target.getBattlerIndex(); } catch { return null; } }).filter(x => x != null),
+        ok: last ? last.result === 1 : hits.length > 0, // (no history: the user has left the field; a move that hit somebody counts as done)
+        damage: hits.reduce((a, h) => a + h.damage, 0), hits: hits.map(h => ({ target: h.target, damage: h.damage })), followUp: !!ph.wasFollowUp });
+    }
+  }
+  function trackBattle(name) {
+    if (name === 'EncounterPhase' || name === 'NextEncounterPhase' || name === 'NewBiomeEncounterPhase') battle.on = true;
+    else if (name === 'BattleEndPhase' || name === 'SelectModifierPhase' || name === 'TitlePhase' || name === 'GameOverPhase') battle.on = false;
+    if (name === 'TitlePhase' || name === 'GameOverPhase') battle.wave = -1; // back at the title: the next wave entered is a new battle, also when its number is the same
   }
 
   // ---- hooks into the game (installed the first time a mod is on in a co-op room) ----
-  const hooked = {}; // which hooks are in: phases, pokemon, statChange, rewards
+  const hooked = {}; // which hooks are in: phases, pokemon, statChange, rewards, heal
+  const WRAPS = '__coopModsWraps', ORIGS = '__coopModsOrigs';
+  // remember obj[method] as it is now, unless it was remembered before: what X.gameMethod answers later
+  function noteOrig(obj, method) {
+    if (!obj || typeof obj[method] !== 'function') return;
+    if (!Object.prototype.hasOwnProperty.call(obj, ORIGS)) Object.defineProperty(obj, ORIGS, { value: {}, enumerable: false });
+    if (!obj[ORIGS][method]) obj[ORIGS][method] = obj[method];
+  }
+  // obj[method] as it was before the core or any extension wrapped it (on that same object); obj[method] itself when nobody has
+  const gameMethod = (obj, method) => (obj && Object.prototype.hasOwnProperty.call(obj, ORIGS) && obj[ORIGS][method]) || (obj ? obj[method] : undefined);
+  // Replace obj[method] by make(original), once per (obj, method, tag): a second call with the same tag does
+  // nothing. obj is a prototype (or one object, like a UI handler). While no mod is on, or outside a co-op
+  // room, the original is called directly.
+  function wrapOnce(obj, method, tag, make, kind) {
+    if (!obj || typeof obj[method] !== 'function') { log('hooks: no ' + method + ' to wrap (' + tag + ')'); return false; }
+    if (!Object.prototype.hasOwnProperty.call(obj, WRAPS)) Object.defineProperty(obj, WRAPS, { value: {}, enumerable: false });
+    const marks = obj[WRAPS], k = tag + ':' + method + ':' + (kind || 'wrap');
+    if (marks[k]) return true;
+    const orig = obj[method];
+    noteOrig(obj, method);
+    let repl = null;
+    try { repl = make(orig); } catch (e) { log('hooks: wrapping ' + method + ' (' + tag + ') failed: ' + String(e)); }
+    if (typeof repl !== 'function') return false;
+    marks[k] = true;
+    obj[method] = function () { return active() && anyOn() ? repl.apply(this, arguments) : orig.apply(this, arguments); };
+    return true;
+  }
+  const guards = {};
+  function guard(what, fn, fallback) { // run fn; an error is logged (20 times at most per name) and does not travel on
+    try { return fn(); } catch (e) {
+      const n = guards[what] = (guards[what] || 0) + 1;
+      if (n <= 20) log('error in ' + what + ': ' + String((e && e.stack) || e).slice(0, 300));
+      return fallback;
+    }
+  }
+  // fn(self, args) runs before the original: return { args: [...] } to change the arguments, { skip: true, value }
+  // to not call the original at all; anything else (or an error) lets it run as it was called.
+  const before = (obj, method, tag, fn) => wrapOnce(obj, method, tag, orig => function (...args) {
+    const r = guard(tag + ' before ' + method, () => fn(this, args));
+    if (r && r.skip) return r.value;
+    return orig.apply(this, r && Array.isArray(r.args) ? r.args : args);
+  }, 'before');
+  // fn(self, args, result) runs after the original: return { value } to change what the caller gets.
+  const after = (obj, method, tag, fn) => wrapOnce(obj, method, tag, orig => function (...args) {
+    const res = orig.apply(this, args);
+    const r = guard(tag + ' after ' + method, () => fn(this, args, res));
+    return r && typeof r === 'object' && 'value' in r ? r.value : res;
+  }, 'after');
+  const protoWith = (obj, method) => { // the prototype in obj's chain that defines method itself
+    for (let p = obj && Object.getPrototypeOf(obj); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) if (Object.prototype.hasOwnProperty.call(p, method)) return p;
+    return null;
+  };
+  const phaseProtos = {}, phaseClassFns = {}; // phase name -> its prototype (once seen) / what extensions want to do with it
+  let pokemonProto = null; const pokemonClassFns = [];
+  const tickFns = [], rewardFns = [];
+  let optionProto = null; // ModifierTypeOption.prototype, taken from the first option the game makes
+
   function hookPhases(s) {
     const pm = s.phaseManager;
     if (pm.__coopMods) return;
@@ -188,7 +416,7 @@
     // every phase starts through startCurrentPhase and ends through shiftPhase (Phase.end)
     const start = pm.startCurrentPhase;
     pm.startCurrentPhase = function () {
-      try { const ph = this.currentPhase; if (ph) { patchPhase(ph); if (active() && anyOn()) phaseEvent('start', ph); } } catch (e) { log('phase start hook error', String(e)); }
+      try { const ph = this.currentPhase; if (ph) { patchPhase(ph); trackBattle(ph.phaseName); if (active() && anyOn()) phaseEvent('start', ph); } } catch (e) { log('phase start hook error', String(e)); }
       return start.apply(this, arguments);
     };
     const shift = pm.shiftPhase;
@@ -197,36 +425,59 @@
       return shift.apply(this, arguments);
     };
     log('hooks: phases');
+    // The phase that is running right now started before these hooks existed (a mod switched on for the first
+    // time in this session, in the middle of a reward screen or a turn): its class is patched now, so that what
+    // the extensions wrap on it (reroll price, option count ...) already answers for the rest of this phase.
+    try { if (pm.currentPhase) patchPhase(pm.currentPhase); } catch (e) { log('phase hook error (current phase)', String(e)); }
   }
   function patchPhase(ph) {
-    const proto = Object.getPrototypeOf(ph);
-    if (!proto || Object.prototype.hasOwnProperty.call(proto, '__coopMods')) return;
-    if (ph.phaseName === 'StatStageChangePhase' && typeof proto.applyStatChangesAndEnd === 'function') {
+    const proto = Object.getPrototypeOf(ph), name = ph.phaseName;
+    if (!proto || !name || phaseProtos[name] === proto) return;
+    phaseProtos[name] = proto;
+    for (const fn of phaseClassFns[name] || []) guard('phase class ' + name, () => fn(proto, ph));
+    if (Object.prototype.hasOwnProperty.call(proto, '__coopMods')) return;
+    if (name === 'StatStageChangePhase' && typeof proto.applyStatChangesAndEnd === 'function') {
       proto.__coopMods = true; hooked.statChange = true;
+      noteOrig(proto, 'applyStatChangesAndEnd');
       const apply = proto.applyStatChangesAndEnd;
       // (pokemon, changes): changes are what really applies, [{stat, stages}], already clamped to -6..+6
       proto.applyStatChangesAndEnd = function (pokemon, changes) {
         const r = apply.apply(this, arguments);
         try {
           if (has('statChange')) {
-            const real = (changes || []).filter(c => c && c.stages).map(c => ({ stat: c.stat, stages: c.stages }));
+            const real = (changes || []).filter(c => c && c.stages).map(c => ({ stat: c.stat, stages: c.stages, name: STAT_NAMES[c.stat] || null }));
             if (real.length) emit('statChange', { pokemon, changes: real, copied: !!(this.options && this.options.coopModCopy) });
           }
         } catch (e) { log('stat change hook error', String(e)); }
         return r;
       };
-    } else if (ph.phaseName === 'SelectModifierPhase' && typeof proto.getModifierTypeOptions === 'function' && typeof proto.applyChosenModifier === 'function') {
+    } else if (name === 'SelectModifierPhase' && typeof proto.getModifierTypeOptions === 'function' && typeof proto.applyChosenModifier === 'function') {
       proto.__coopMods = true; hooked.rewards = true;
+      noteOrig(proto, 'getModifierTypeOptions'); noteOrig(proto, 'applyChosenModifier');
       const options = proto.getModifierTypeOptions;
       proto.getModifierTypeOptions = function () {
-        const opts = options.apply(this, arguments);
-        try { if (Array.isArray(opts)) offer(this, opts); } catch (e) { log('reward offer error', String(e)); }
+        let opts = options.apply(this, arguments);
+        try {
+          if (Array.isArray(opts)) {
+            if (opts[0] && !optionProto) optionProto = Object.getPrototypeOf(opts[0]);
+            offer(this, opts);
+            if (active() && anyOn()) for (const fn of rewardFns) { const r = guard('reward options', () => fn(this, opts)); if (Array.isArray(r)) opts = r; }
+          }
+        } catch (e) { log('reward offer error', String(e)); }
         return opts;
       };
       const chosen = proto.applyChosenModifier;
       proto.applyChosenModifier = function (type, cost, cb) {
         if (!type || !type.__coopMod) return chosen.apply(this, arguments);
-        try { return pickHolder(this, type, cost, cb); } catch (e) { log('reward pick error', String(e)); return false; }
+        try { return pickItem(this, type, cost, cb); } catch (e) { log('reward pick error', String(e)); return false; }
+      };
+    } else if (name === 'PokemonHealPhase' && typeof proto.doHealPokemon === 'function') {
+      proto.__coopMods = true; hooked.heal = true;
+      noteOrig(proto, 'doHealPokemon');
+      const doHeal = proto.doHealPokemon; // where the phase really restores the HP
+      proto.doHealPokemon = function () {
+        healCtx = this.__coopModHeal || null;
+        try { return doHeal.apply(this, arguments); } finally { healCtx = null; }
       };
     }
   }
@@ -236,9 +487,9 @@
     if (!any) return;
     let proto = Object.getPrototypeOf(any); // PlayerPokemon / EnemyPokemon -> Pokemon
     while (proto && !Object.prototype.hasOwnProperty.call(proto, 'damageAndUpdate')) proto = Object.getPrototypeOf(proto);
-    if (!proto || proto.__coopMods) { hooked.pokemon = !!proto; if (!proto) log('hooks: Pokemon class not found in this build'); return; }
+    if (!proto || proto.__coopMods) { hooked.pokemon = !!proto; if (!proto) log('hooks: Pokemon class not found in this build'); else pokemonReady(proto); return; }
     proto.__coopMods = true; hooked.pokemon = true;
-    const wrap = (name, make) => { if (typeof proto[name] === 'function') proto[name] = make(proto[name]); else log('hooks: no Pokemon.' + name + ' in this build'); };
+    const wrap = (name, make) => { if (typeof proto[name] === 'function') { noteOrig(proto, name); proto[name] = make(proto[name]); } else log('hooks: no Pokemon.' + name + ' in this build'); };
     // damage a move would do. Returns {cancelled, result, damage}; the game calls it for real hits and, with
     // simulated (the default), for the enemy AI's estimates.
     wrap('getAttackDamage', orig => function (o) {
@@ -271,6 +522,7 @@
         }
       } catch (e) { log('damage hook error', String(e)); }
       const r = orig.call(this, dmg, opts);
+      try { if (r > 0 && opts && opts.source && active() && anyOn()) { if (moveHits.length > 200) moveHits = []; moveHits.push({ attacker: opts.source, target: this, damage: r }); } } catch {}
       if (after) for (const fn of after) { try { fn(r); } catch (e) { log('after damage error', String(e)); } }
       return r;
     });
@@ -289,27 +541,43 @@
       try { if (STATUS[effect] && has('status')) emit('status', { pokemon: this, status: STATUS[effect] }); } catch (e) { log('status hook error', String(e)); }
       return r;
     });
-    log('hooks: Pokemon damage, move choice, status');
+    // every gain of HP (heal phases, abilities, medicine used from the reward screen...). Returns what was really restored.
+    wrap('heal', orig => function () {
+      const r = orig.apply(this, arguments);
+      try { if (r > 0 && has('heal')) emit('heal', { pokemon: this, amount: r, tag: healCtx ? healCtx.tag : null, inBattle: B.inBattle(), phase: phaseNow() }); } catch (e) { log('heal hook error', String(e)); }
+      return r;
+    });
+    log('hooks: Pokemon damage, move choice, status, heal');
+    pokemonReady(proto);
+  }
+  function pokemonReady(proto) {
+    if (pokemonProto) return;
+    pokemonProto = proto;
+    for (const fn of pokemonClassFns) guard('pokemon class', () => fn(proto));
   }
 
   // ---- rewards ----
-  const SCREEN_CHANCE = 0.1, SCREEN_WEIGHT = [8, 6, 5, 3, 2]; // by rarity: COMMON, GREAT, ULTRA, ROGUE, MASTER
+  const cfg = { normalOffer: true, screenChance: 0.1 }; // extensions may change these (X.cfg)
+  const SCREEN_WEIGHT = [8, 6, 5, 3, 2]; // by rarity: COMMON, GREAT, ULTRA, ROGUE, MASTER
   const debug = { force: [] }; // test only: item keys the next reward screen must offer
-  function rng(str) { // small seeded generator: the same run, wave and reroll always give the same offers
+  function rng(str) { // small seeded generator: the same string always gives the same numbers
     let h = 2166136261;
     for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
     return () => { h = (h + 0x6D2B79F5) | 0; let t = h; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   }
+  // a reward option for a mod item. like: any option the game made (for its class); may be left out once the
+  // game has shown a reward screen in this session.
   function makeOption(like, key, upgradeCount) {
     const it = items[key];
+    if (!it) return null;
     const type = { // what the reward screen reads of an item type: name, iconImage, tier, getDescription()
       id: 'COOPMOD_' + key.toUpperCase().replace(/[^A-Z0-9]+/g, '_'), localeKey: '', name: it.name, group: 'coopmod:' + key, soundName: 'se/restore',
-      iconImage: it.icon, tier: TIER[it.tier], __coopMod: key,
+      get iconImage() { return frameOf(it); }, tier: TIER[it.tier], __coopMod: key,
       getDescription: () => it.description,
       setTier(t) { this.tier = t; }, getOrInferTier() { return this.tier; }, withIdFromFunc() { return this; }, withTierFromPool() { return this; },
       newModifier() { return { type: this }; }, // not a game modifier: scene.addModifier does nothing with it
     };
-    const opt = Object.create(Object.getPrototypeOf(like)); // a ModifierTypeOption
+    const opt = Object.create((like && Object.getPrototypeOf(like)) || optionProto || Object.prototype); // a ModifierTypeOption
     opt.type = type; opt.upgradeCount = upgradeCount || 0; opt.cost = 0;
     return opt;
   }
@@ -318,18 +586,20 @@
     const c = ph.__coop;
     const forced = debug.force.splice(0).filter(k => items[k]);
     if (!active() || !c || c.round !== 1 || c.single || ph.customModifierSettings || ph.isCopy) return;
-    if (!anyOn() && !forced.length) return;
+    if (!forced.length && (!anyOn() || !cfg.normalOffer)) return;
     const s = scene(), b = s.currentBattle;
     const roll = rng([s.seed, b ? b.waveIndex : 0, ph.rerollCount || 0, 'coop-mods'].join(':'));
     const taken = new Set(), put = [];
+    const open = k => isOn(items[k].mod) && !taken.has(k) && canTake(k, c.picker); // nobody has room for it: not offered
     opts.forEach((opt, i) => {
       const r = roll();
       if (!opt || !opt.type) return;
       let key = null;
       if (forced.length) key = forced.shift();
+      else if (!anyOn() || !cfg.normalOffer) return; // (a forced list shorter than the screen: the other slots stay the game's)
       else {
         const tier = opt.type.tier, pool = POOL[tier];
-        const cands = Object.keys(items).filter(k => isOn(items[k].mod) && TIER[items[k].tier] === tier && !taken.has(k));
+        const cands = Object.keys(items).filter(k => TIER[items[k].tier] === tier && open(k));
         if (!pool || !cands.length) return;
         const w = k => Math.max(0, Math.min(Number(items[k].weight) || 0, pool.cap));
         const total = pool.total + cands.reduce((a, k) => a + w(k), 0);
@@ -343,8 +613,8 @@
     });
     // On top of the rarity pools (where a ROGUE or MASTER item would turn up once in hundreds of screens): with
     // mods on, about one reward screen in ten swaps one of its options for a mod item, picked by rarity weight.
-    if (!put.length && anyOn() && roll() < SCREEN_CHANCE) {
-      const cands = Object.keys(items).filter(k => isOn(items[k].mod) && SCREEN_WEIGHT[TIER[items[k].tier]]);
+    if (!put.length && anyOn() && cfg.normalOffer && roll() < cfg.screenChance) {
+      const cands = Object.keys(items).filter(k => SCREEN_WEIGHT[TIER[items[k].tier]] && open(k));
       const slots = opts.map((o, i) => (o && o.type ? i : -1)).filter(i => i >= 0);
       if (cands.length && slots.length) {
         const w = k => SCREEN_WEIGHT[TIER[items[k].tier]], total = cands.reduce((x, k) => x + w(k), 0);
@@ -358,22 +628,34 @@
     if (put.length) log('rewards: offered ' + put.join(', '));
   }
   const handlerIndex = (s, name, fallback) => { const i = (s.ui.handlers || []).findIndex(h => h && h.constructor && h.constructor.name === name); return i >= 0 ? i : fallback; };
-  // a mod item was picked on the reward screen: ask which Pokémon holds it, the way the game does for its own
-  // held items (party menu in MODIFIER mode; host-team.js limits it to the picker's own Pokémon)
-  function pickHolder(ph, type, cost, cb) {
+  const fullText = (p, it) => (p ? nameOf(p) + '的' : '队伍的') + it.name + '已经带满了（最多' + (p ? maxOf(p, it.key) : it.max) + '个）';
+  // a mod item was picked on the reward screen. A passive item goes into the team bag. A held item asks which
+  // Pokémon holds it, the way the game does for its own held items (party menu in MODIFIER mode; host-team.js
+  // limits it to the picker's own Pokémon); one that already has the item's max is refused.
+  function pickItem(ph, type, cost, cb) {
     const s = scene(), key = type.__coopMod, it = items[key];
     if (!it) { s.ui.playError(); return false; }
+    if (it.kind === 'passive') {
+      if (!give(null, key, {}, 'reward')) { // the bag has its max: the screen stays as it is
+        log('rewards: ' + key + ' refused, the team bag has ' + it.max);
+        try { s.ui.playError(); } catch {}
+        return false;
+      }
+      try { s.ui.playSelect(); } catch {}
+      ph.applyModifier({ type }, cost, true); // ends the reward round like any other pick
+      return cost === -1;
+    }
     const party = s.getPlayerParty(), partyMode = handlerIndex(s, 'PartyUiHandler', 8);
     const rewardMode = typeof s.ui.mode === 'number' ? s.ui.mode : handlerIndex(s, 'ModifierSelectUiHandler', 6); // the screen we are on
     s.ui.setModeWithoutClear(partyMode, 4 /* PartyUiMode.MODIFIER */, -1, slot => {
-      if (slot < 6 && party[slot]) {
+      if (slot < 6 && party[slot] && countOf(party[slot], key) < maxOf(party[slot], key)) {
         s.ui.setMode(rewardMode, ph.isPlayer()).then(() => {
-          give(party[slot], key, {});
+          give(party[slot], key, {}, 'reward');
           try { s.ui.playSelect(); } catch {}
           ph.applyModifier({ type }, cost, true); // ends the reward round like any other pick
         });
       } else ph.resetModifierSelect(cb);
-    }, p => (holds(p, key) ? nameOf(p) + '已经带着' + it.name + '了' : null));
+    }, p => (countOf(p, key) >= maxOf(p, key) ? fullText(p, it) : null));
     return cost === -1;
   }
 
@@ -381,16 +663,36 @@
   const nameOf = p => (p ? (p.getNameToRender ? p.getNameToRender() : p.name) : '');
   const whoAt = (s, slot) => (window.CoopTeam && CoopTeam.ownerOf(s.getPlayerField()[slot])) || (slot === 1 ? 'p2' : 'p1');
   const targetsOf = c => (c.targets && c.targets.length ? c.targets : (c.move && c.move.targets) || []);
-  let combo = null; // host-game.js's own verdict for the turn that is running: {key: 'wave:turn', target}
+  // 集火 this turn. host-game.js decides it (and counts the streak shown on its banner) a moment after the turn
+  // starts; its verdict is `combo`. Until it arrives the same rule is read from the game when the turn starts
+  // (`mark`), counting on from host-game.js's streak of the turn before. A verdict only counts when it came
+  // after the turn really started (host-game.js can speak early when something runs between the two players'
+  // command menus).
+  let combo = null, seq = 0; // {key: 'wave:turn', target, streak, seq}
+  let mark = { key: '', target: null, streak: 0, seq: 0 };
   function watchCombo() {
     if (combo || !window.CoopGame) return;
-    combo = { key: '', target: null };
+    combo = { key: '', target: null, streak: 0, seq: 0 };
     CoopGame.on((type, d) => {
       if (type !== 'turnstart') return;
-      const b = scene().currentBattle;
-      combo = { key: b ? b.waveIndex + ':' + b.turn : '', target: d && d.combo ? d.target : null };
+      combo = { key: turnKey(), target: d && d.combo ? d.target : null, streak: d && d.combo ? Number(d.streak) || 1 : 0, seq: ++seq };
     });
   }
+  const turnKey = () => { const b = scene() && scene().currentBattle; return b ? b.waveIndex + ':' + b.turn : ''; };
+  // the rule itself (the same as host-game.js): both players' Pokémon aim one single-target move at the same enemy
+  function aimedAt() {
+    const s = scene(), b = s && s.currentBattle;
+    if (!b || !b.double || !b.turnCommands) return null;
+    const aim = c => (c && c.command === 0 && targetsOf(c).length === 1 ? targetsOf(c)[0] : null);
+    const t0 = aim(b.turnCommands[0]), t1 = aim(b.turnCommands[1]);
+    return whoAt(s, 0) !== whoAt(s, 1) && t0 != null && t0 >= 2 && t0 === t1 ? t0 : null;
+  }
+  const hostStreak = () => { try { return Number(CoopGame.state().streak) || 0; } catch { return 0; } };
+  function markTurn() { // the turn starts now: every command is in
+    const target = aimedAt();
+    mark = { key: turnKey(), target, streak: target != null ? hostStreak() + 1 : 0, seq: ++seq };
+  }
+  const verdict = () => { const key = turnKey(); return !key ? null : combo && combo.key === key && combo.seq > mark.seq ? combo : mark.key === key ? mark : null; };
   const B = {
     name: nameOf,
     isPlayer: p => !!(p && p.isPlayer && p.isPlayer()),
@@ -398,16 +700,44 @@
     owner: p => (window.CoopTeam ? CoopTeam.ownerOf(p) : null), // 'p1' | 'p2'
     hp: p => p.hp, maxHp: p => p.getMaxHp(),
     onField: p => !!(p && p.isActive && p.isActive(true) && !p.isFainted()),
+    fainted: p => !!(p && p.isFainted && p.isFainted()),
     playerField: () => scene().getPlayerField().filter(p => B.onField(p)),
+    enemyField: () => scene().getEnemyField().filter(p => B.onField(p)),
+    // every Pokémon of the two players, in the party's order / those not on the field (fainted ones included)
+    party: () => partyOf(scene()).slice(),
+    bench: () => partyOf(scene()).filter(p => !(p.isOnField && p.isOnField())),
     // the other Pokémon on the same side, if it is on the field and standing
     ally: p => { let a = null; try { a = p.getAlly(); } catch {} return B.onField(a) ? a : null; },
+    // two different Pokémon on the same side (whoever owns them)
+    isAlly: (a, b) => !!(a && b && a !== b && B.isPlayer(a) === B.isPlayer(b)),
     status: p => STATUS[(p && p.status && p.status.effect) || 0] || null, // 'poison' | 'toxic' | 'paralysis' | 'sleep' | 'freeze' | 'burn' | null
     statusName: st => STATUS_ZH[st] || '',
     wave: () => (scene().currentBattle || {}).waveIndex || 0,
     turn: () => (scene().currentBattle || {}).turn || 0,
+    // between the start of an encounter and the end of its battle (not on the reward screen, not in a shop)
+    inBattle() {
+      if (battle.on != null) return battle.on && !!scene().currentBattle;
+      const n = phaseNow();
+      return !!scene().currentBattle && n !== 'SelectModifierPhase' && n !== 'BattleEndPhase' && n !== 'TitlePhase';
+    },
     message: text => scene().phaseManager.queueMessage(String(text)),
-    // lose HP now, with the game's hit animation; not a move hit (no attacker)
-    damage: (p, amount) => p.damageAndUpdate(Math.max(1, Math.floor(amount)), {}),
+    // lose HP now, with the game's hit animation; not a move hit (no attacker). opts.indirect: like poison or
+    // 生命宝珠's recoil (no hit sound of a move; 气势头带 and the like do not answer it)
+    damage: (p, amount, opts) => p.damageAndUpdate(Math.max(1, Math.floor(amount)), opts && opts.indirect ? { result: 12 /* HitResult.INDIRECT */ } : {}),
+    // Restore HP in battle the game's own way: its heal animation, the number over the Pokémon, 回复护符 counts.
+    // Queued like a message: it happens when the queue gets there. opts: message (shown after), tag (the 'heal'
+    // event this causes carries it, so a handler can tell its own heals apart), quiet (no animation).
+    // false: not on the field, already at full HP, or nothing to restore.
+    heal(p, amount, opts) {
+      const o = opts || {};
+      amount = Math.floor(Number(amount) || 0);
+      if (!(amount > 0) || !B.onField(p) || p.isFullHp()) return false;
+      const pm = scene().phaseManager;
+      const ph = pm.create('PokemonHealPhase', p.getBattlerIndex(), amount, { message: o.message ? String(o.message) : undefined, showFullHpMessage: false, skipAnim: !!o.quiet });
+      ph.__coopModHeal = { tag: o.tag == null ? null : String(o.tag) };
+      pm.unshiftPhase(ph);
+      return true;
+    },
     // cured when the queued messages get there; false when there is nothing to cure
     cureStatus(p, text) {
       const st = B.status(p);
@@ -416,9 +746,25 @@
       p.resetStatus(false, false, false, true);
       return true;
     },
+    // stat stages now: { atk, def, spatk, spdef, spd, acc, eva }, each -6..+6
+    statStages(p) { const out = {}; STAT_NAMES.forEach((n, i) => { if (n) out[n] = (p.getStatStage && p.getStatStage(i)) || 0; }); return out; },
+    // the Pokémon's own number for a stat ('atk' ... 'spd'; stages, items and abilities not counted)
+    stat: (p, stat) => { const n = statNum(stat); return n >= 1 && n <= 5 ? p.getStat(n, false) : 0; },
+    // the highest of 攻击 防御 特攻 特防 速度 (HP is not looked at); the first in that order when two are equal
+    highestStat(p) { let best = 'atk', top = -1; for (const n of statApi.battle) { const v = B.stat(p, n); if (v > top) { top = v; best = n; } } return best; },
+    // raise (n > 0) or lower (n < 0) the Pokémon's own stat stages, as if it had done it itself (the game's
+    // animation and message; 唱反调 and 单纯 apply; a statChange event follows, not marked copied).
+    // stat: a name ('atk'), a list of names, or 'all' (the five battle stats).
+    raise(p, stat, n) {
+      n = Math.trunc(n == null ? 1 : Number(n) || 0);
+      const list = (stat === 'all' ? statApi.battle : [].concat(stat)).map(statNum).filter(Boolean);
+      if (!n || !list.length || !B.onField(p)) return false;
+      scene().phaseManager.unshiftNew('StatStageChangePhase', { battlerIndex: p.getBattlerIndex(), sourcePokemon: p, changes: list.map(st => ({ stat: st, stages: n })) });
+      return true;
+    },
     // the same stat stages for another Pokémon; marked so that no mod reacts to it again (event.copied)
     changeStats(p, changes) {
-      const list = (changes || []).filter(c => c && c.stages).map(c => ({ stat: c.stat, stages: c.stages }));
+      const list = (changes || []).filter(c => c && c.stages && statNum(c.stat)).map(c => ({ stat: statNum(c.stat), stages: c.stages }));
       if (!list.length || !B.onField(p)) return false;
       scene().phaseManager.unshiftNew('StatStageChangePhase', { battlerIndex: p.getBattlerIndex(), sourcePokemon: p, changes: list, ignoreAbilities: true, coopModCopy: true });
       return true;
@@ -432,41 +778,61 @@
       return null;
     },
     // 集火: the enemy both players' Pokémon aim one single-target move at this turn (battler index), or null.
-    // host-game.js decides it at turn start; before its verdict arrives the same rule is read from the game.
-    focusTarget() {
-      const s = scene(), b = s && s.currentBattle;
-      if (!b || !b.double || !b.turnCommands) return null;
-      if (combo && combo.key === b.waveIndex + ':' + b.turn) return combo.target;
-      const aim = c => (c && c.command === 0 && targetsOf(c).length === 1 ? targetsOf(c)[0] : null);
-      const t0 = aim(b.turnCommands[0]), t1 = aim(b.turnCommands[1]);
-      return whoAt(s, 0) !== whoAt(s, 1) && t0 != null && t0 >= 2 && t0 === t1 ? t0 : null;
-    },
+    // The same verdict as host-game.js's 集火 banner (before the turn starts: what the commands so far say).
+    focusTarget() { const v = verdict(); return v ? v.target : aimedAt(); },
+    // 集火层数: how many turns in a row, this one included, the two players have focused (host-game.js counts
+    // it and shows it on the 集火 banner). 0 when this turn is not a 集火.
+    focusStreak() { const v = verdict(); return v ? v.streak : aimedAt() == null ? 0 : hostStreak() + 1; },
+    // a number in [0, 1) that is the same for the same run, wave, turn and tag (so a reload replays it)
+    random: tag => rng([scene().seed, B.wave(), B.turn(), String(tag == null ? '' : tag)].join(':'))(),
   };
+  const apiExt = []; // extensions: mod => ({ ... }) merged into each mod's api object
+  const isMon = x => !!x && typeof x === 'object' && typeof x.getBattlerIndex === 'function';
   function makeApi(mod) {
-    return {
+    const api = {
       version: API_VERSION,
       manifest: mod.manifest,
       battle: B,
+      STAT: statApi,
       log: (...a) => log('[' + mod.id + ']', ...a),
-      // a new item: { id, name, description, tier: 'ULTRA' | 'ROGUE' | 'MASTER' (also 'COMMON', 'GREAT'), weight, icon }
+      // a new item: { id, name, description, tier: 'ULTRA' | 'ROGUE' | 'MASTER' (also 'COMMON', 'GREAT'), weight,
+      //   kind: 'held' (default) | 'passive', max (default 1), icon (a packed file's name or a frame of the game's item atlas) }
       item(def) {
         if (!def || !/^[a-z0-9][a-z0-9-]{1,39}$/.test(def.id || '')) throw new Error('item id must be lowercase letters, digits and -');
         if (!(def.tier in TIER)) throw new Error('item ' + def.id + ': tier must be one of ' + Object.keys(TIER).join(', '));
         if (!def.name || !def.description) throw new Error('item ' + def.id + ': name and description are required');
+        const kind = def.kind == null ? 'held' : def.kind;
+        if (kind !== 'held' && kind !== 'passive') throw new Error('item ' + def.id + ": kind must be 'held' or 'passive'");
+        const max = def.max == null ? 1 : Math.floor(Number(def.max));
+        if (!(max >= 1 && max <= 999)) throw new Error('item ' + def.id + ': max must be a whole number from 1 to 999');
         const key = mod.id + ':' + def.id;
         if (items[key]) throw new Error('item ' + key + ' defined twice');
-        const it = items[key] = { key, mod: mod.id, id: def.id, name: String(def.name), description: String(def.description), tier: def.tier, weight: Number(def.weight) || 0, icon: String(def.icon || 'unknown') };
+        // icon: no name -> the packed picture called like the item, if the mod brought one
+        const want = def.icon == null ? def.id : String(def.icon).replace(/\.png$/, '');
+        const custom = iconData[mod.id + '/' + want] ? mod.id + '/' + want : null;
+        const it = items[key] = { key, mod: mod.id, id: def.id, name: String(def.name), description: String(def.description), tier: def.tier, weight: Number(def.weight) || 0,
+          kind, max, v1: mod.v1, icon: custom ? want : String(def.icon || 'unknown'), custom, fallback: String(def.iconFallback || 'unknown'),
+          note: typeof def.note === 'function' ? def.note : null };
         mod.items.push(key);
+        const on = () => isOn(mod.id), passive = kind === 'passive';
         return {
-          key, name: it.name,
-          heldBy: p => holds(p, key) && isOn(mod.id),
-          state: p => (holds(p, key) ? held[p.id][key] : null), // a plain object kept in the save: put only JSON values in it
-          give: (p, state) => give(p, key, state),
-          remove: p => remove(p, key),
+          key, id: def.id, name: it.name, kind, max,
+          // held: does this Pokémon have it; passive: is there one in the team bag. Always false while the mod is off.
+          heldBy: p => on() && (passive ? bagCount(key) > 0 : holds(p, key)),
+          count: p => (!on() ? 0 : passive ? bagCount(key) : countOf(p, key)),
+          // a plain object kept in the save, one per holder (per team for a passive item): put only JSON values in it
+          state: p => { const e = passive ? bag[key] : entryOf(p, key); return e ? e.s : null; },
+          give: (a, b) => (passive ? give(null, key, isMon(a) || a == null ? b : a) : give(a, key, b)),
+          take: (a, b) => (passive ? take(null, key, typeof a === 'number' ? a : typeof b === 'number' ? b : 1) : take(a, key, b == null ? 1 : b)),
+          remove: p => remove(passive ? null : p, key),
+          // the Pokémon in the party that have it (held items; in the party's order)
+          holders: () => (on() && !passive ? partyOf(scene()).filter(p => holds(p, key)) : []),
+          canTake: who => canTake(key, who),
         };
       },
       on(type, fn) {
         if (!EVENTS.includes(type)) throw new Error('unknown event ' + type + ' (known: ' + EVENTS.join(', ') + ')');
+        if (typeof fn !== 'function') throw new Error('api.on(' + type + '): a function is needed');
         (mod.on[type] = mod.on[type] || []).push(fn);
       },
       // a game phase by its class name ('TurnInitPhase', 'ObtainStatusEffectPhase' ...), before it starts or as it ends
@@ -480,7 +846,16 @@
         const k = mod.id + ':' + (tag || '');
         return m[k] = m[k] || {};
       },
+      // true the first time it is asked with this tag in a turn (wave:turn), false after that
+      oncePerTurn(tag) {
+        const k = String(tag == null ? '' : tag), now = (scene().seed || '') + ':' + turnKey();
+        if (mod.once[k] === now) return false;
+        mod.once[k] = now;
+        return true;
+      },
     };
+    for (const f of apiExt) { const more = guard('api extension for ' + mod.id, () => f(mod, api)); if (more && typeof more === 'object') for (const k of Object.keys(more)) { if (k in api) log('api extension: ' + k + ' is taken, left out'); else api[k] = more[k]; } }
+    return api;
   }
 
   // ---- drawn into the game (host window and the guest's video): who holds what ----
@@ -497,20 +872,30 @@
     if (used) sp.setAlpha(0.45).setTint(0x8a8a8a);
     return sp;
   }
-  // a small dark plate with the item icons (and names when there is room), top-left corner at x, y
-  function plate(s, x, y, list, names, color) {
+  // a small dark plate with the item icons (×n for a stack; names when there is room), top-left corner at x, y
+  function plate(s, x, y, list, names, color, more) {
     const c = new Phaser.GameObjects.Container(s, x, y), g = new Phaser.GameObjects.Graphics(s);
     c.add(g);
     let cx = 1;
     list.forEach(it => {
-      const used = !!(it.state && it.state.used);
-      const ic = icon(s, it.def.icon, used);
+      const used = !!(it.state && it.state.used), many = it.count > 1 ? '×' + it.count : '';
+      const ic = icon(s, frameOf(it.def), used);
       if (ic) { ic.setPosition(cx, 0); c.add(ic); cx += 12; }
-      if (names) { const t = text(s, it.def.name + (used ? '(已用)' : ''), used ? '#a59cb3' : '#f8f8f8', 54); t.setPosition(cx, 1); c.add(t); cx += Math.ceil(t.displayWidth) + 3; }
+      if (names) { const t = text(s, it.def.name + many + (used ? '(已用)' : ''), used ? '#a59cb3' : '#f8f8f8', 54); t.setPosition(cx, 1); c.add(t); cx += Math.ceil(t.displayWidth) + 3; }
+      else if (many) { const t = text(s, many, '#f8f8f8', 48); t.setPosition(cx - 1, 3); c.add(t); cx += Math.ceil(t.displayWidth) + 1; }
     });
+    if (more > 0) { const t = text(s, '+' + more, '#f8f8f8', 48); t.setPosition(cx, 3); c.add(t); cx += Math.ceil(t.displayWidth) + 1; } // kinds left out for lack of room
     g.fillStyle(0x1d1824, 0.85).fillRoundedRect(0, -1, cx + 1, 14, 2);
     g.lineStyle(1, Phaser.Display.Color.HexStringToColor(color).color, 0.9).strokeRoundedRect(0, -1, cx + 1, 14, 2);
     c.w = cx + 1;
+    return c;
+  }
+  // a plate no wider than maxW: with names when they fit, else icons only, else as many icons as fit and "+N"
+  function fitPlate(s, list, names, color, maxW) {
+    let c = plate(s, 0, 0, list, names, color);
+    if (c.w <= maxW) return c;
+    if (names) { c.destroy(); c = plate(s, 0, 0, list, false, color); }
+    for (let n = list.length - 1; c.w > maxW && n >= 1; n--) { c.destroy(); c = plate(s, 0, 0, list.slice(0, n), false, color, list.length - n); }
     return c;
   }
   function draw() {
@@ -546,21 +931,25 @@
         });
       }
     }
-    const sig = mode + '|' + JSON.stringify(marks.map(m => [m.id, m.x, m.y, m.anchor, m.list.map(it => [it.key, !!(it.state && it.state.used)])]));
+    const sig = mode + '|' + iconReg.done.size + '|' + JSON.stringify(marks.map(m => [m.id, m.x, m.y, m.anchor, m.list.map(it => [it.key, it.count, !!(it.state && it.state.used)])]));
     if (sig === ov.sig) return;
     ov.sig = sig;
     ov.layer.removeAll(true);
+    const feet = []; // plates already placed at a Pokémon's feet: [x, y, w]
     marks.forEach(m => {
-      const c = plate(s, 0, 0, m.list, m.names, m.color);
-      if (m.anchor === 'feet') c.setPosition(Math.max(2, m.x - c.w + 6), Math.min(m.y - 15, 115)); // left of the sprite's feet, above the message box
-      else if (m.anchor === 'card') c.setPosition(Math.max(2, m.x - c.w - 2), m.y + 1);
-      else { // a row has about 66 px free between the level and the HP numbers: names only when they fit
-        let row = c;
-        if (c.w > 66) { c.destroy(); row = plate(s, 0, 0, m.list, false, m.color); }
-        row.setPosition(m.x, m.y);
-        ov.layer.add(row);
-        return;
+      // feet: left of the sprite's feet, above the message box (at most 150 px wide). card: along the top edge of
+      // the big card of a Pokémon on the field, never wider than the card (about 104 px), so that it stays off the
+      // reserve rows and the option menu. row: about 66 px free between the level and the HP numbers.
+      const c = fitPlate(s, m.list, m.names, m.color, m.anchor === 'feet' ? 150 : m.anchor === 'card' ? 104 : 66);
+      if (m.anchor === 'feet') {
+        const w = c.w, x = Math.max(2, m.x - w + 6); let y = Math.min(m.y - 15, 115);
+        // two long plates would lie on top of each other: the later one goes one line up
+        while (y > 30 && feet.some(f => f[1] === y && x < f[0] + f[2] && f[0] < x + w)) y -= 15;
+        feet.push([x, y, w]);
+        c.setPosition(x, y);
       }
+      else if (m.anchor === 'card') c.setPosition(Math.max(2, m.x - c.w - 2), m.y + 1);
+      else c.setPosition(m.x, m.y);
       ov.layer.add(c);
     });
   }
@@ -573,6 +962,17 @@
     (kids || []).forEach(k => k && e.appendChild(k));
     return e;
   };
+  // an item's icon for the list: the mod's own picture, or the frame cut out of the game's item texture
+  function iconEl(it) {
+    try {
+      if (it.custom && iconData[it.custom]) return el('img', { class: 'ic', src: iconData[it.custom].uri, alt: '' });
+      const s = scene(), f = s && s.textures && s.textures.exists('items') ? s.textures.get('items').get(s.textures.get('items').has(it.icon) ? it.icon : 'unknown') : null;
+      if (!f || !f.source || !f.source.image) return el('span', { class: 'ic' });
+      const cv = el('canvas', { class: 'ic', width: ICON, height: ICON });
+      cv.getContext('2d').drawImage(f.source.image, f.cutX, f.cutY, f.cutWidth, f.cutHeight, Math.floor((ICON - f.cutWidth) / 2), Math.floor((ICON - f.cutHeight) / 2), f.cutWidth, f.cutHeight);
+      return cv;
+    } catch { return el('span', { class: 'ic' }); }
+  }
   const keysOff = e => { if (!panel) return; if (e.key === 'Escape' && e.type === 'keydown') closePanel(); e.stopImmediatePropagation(); };
   function closePanel() {
     if (!panel) return;
@@ -583,13 +983,15 @@
     if (!document.getElementById('prsModsCss')) {
       const css = el('style', { id: 'prsModsCss' });
       css.textContent = '#prsModsMask{position:fixed;inset:0;z-index:2147483002;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center}' +
-        '#prsModsCard{box-sizing:border-box;width:min(94vw,520px);max-height:92vh;overflow:auto;padding:14px 16px;border-radius:12px;background:#2b2633;color:#f1eef5;font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;user-select:none;-webkit-user-select:none}' +
+        '#prsModsCard{box-sizing:border-box;width:min(94vw,560px);max-height:92vh;overflow:auto;padding:14px 16px;border-radius:12px;background:#2b2633;color:#f1eef5;font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;user-select:none;-webkit-user-select:none}' +
         '#prsModsCard h2{margin:0 0 2px;font-size:17px}#prsModsCard p{margin:4px 0;color:#b3abc0;font-size:12.5px}' +
         '#prsModsCard .mod{margin:10px 0;padding:10px 12px;border-radius:9px;background:#1f1b26}' +
         '#prsModsCard .head{display:flex;align-items:center;gap:10px}#prsModsCard .head b{font-size:15px;flex:1}' +
         '#prsModsCard .meta{color:#b3abc0;font-size:12px}#prsModsCard .desc{margin:4px 0 6px}' +
-        '#prsModsCard ul{margin:4px 0 0;padding:0;list-style:none}#prsModsCard li{margin:3px 0;font-size:12.5px;color:#d9d3e3}' +
-        '#prsModsCard li i{font-style:normal;font-weight:600}' +
+        '#prsModsCard ul{margin:4px 0 0;padding:0;list-style:none}#prsModsCard li{margin:5px 0;font-size:12.5px;color:#d9d3e3;display:flex;gap:8px;align-items:flex-start}' +
+        '#prsModsCard li i{font-style:normal;font-weight:600}#prsModsCard li small{color:#b3abc0;font-size:11.5px}#prsModsCard li div{flex:1}' +
+        '#prsModsCard .ic{flex:none;width:32px;height:32px;image-rendering:pixelated;object-fit:contain}' +
+        '#prsModsCard .bag{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:4px}#prsModsCard .bag span{display:flex;align-items:center;gap:4px;font-size:12.5px}' +
         '#prsModsCard button{padding:7px 14px;border:0;border-radius:7px;background:#6d5bd0;color:#fff;font-size:14px;cursor:pointer}' +
         '#prsModsCard button.off{background:#4a4356}#prsModsCard .row{display:flex;justify-content:flex-end;margin-top:8px}' +
         '#prsModsCard .err{color:#ff8a7a;font-size:12px}';
@@ -609,7 +1011,7 @@
           const it = items[k], t = TIER[it.tier];
           const name = el('i', { text: it.name + '（' + TIER_ZH[t] + '）' });
           name.style.color = TIER_CSS[t];
-          return el('li', {}, [name, document.createTextNode(' ' + it.description.replace(/\n/g, ''))]);
+          return el('li', {}, [iconEl(it), el('div', {}, [name, el('small', { text: ' ' + KIND_ZH[it.kind] + ' · 最大携带数量 ' + it.max }), el('br'), document.createTextNode(it.description.replace(/\n/g, ''))])]);
         }));
         card.appendChild(el('div', { class: 'mod' }, [
           el('div', { class: 'head' }, [el('b', { text: mf.name || id }), btn]),
@@ -618,6 +1020,15 @@
           m.error ? el('div', { class: 'err', text: '这个 mod 没能加载：' + m.error.slice(0, 160) }) : list,
         ]));
       });
+      // the team bag: passive items of this run (of mods that are on)
+      if (active() && partyOf(scene()).length && order.some(id => mods[id].items.some(k => items[k].kind === 'passive'))) {
+        const inBag = shownBag();
+        card.appendChild(el('div', { class: 'mod' }, [
+          el('div', { class: 'head' }, [el('b', { text: '队伍背包（被动增益）' })]),
+          inBag.length ? el('div', { class: 'bag' }, inBag.map(it => el('span', {}, [iconEl(it.def), document.createTextNode(it.def.name + ' ×' + it.count + '（最多 ' + it.def.max + (noteOf(it) ? '，' + noteOf(it) : '') + '）')])))
+            : el('div', { class: 'meta', text: '这一局还没有拿到被动增益道具。' }),
+        ]));
+      }
       card.appendChild(el('p', { text: active() ? '改了马上生效；奖励里的新道具从下一次战后奖励起出现。' : '现在没有开着的合作房间：开关先记下，开房间后生效。' }));
       card.appendChild(el('div', { class: 'row' }, [el('button', { text: '回到游戏', onclick: closePanel })]));
     };
@@ -633,19 +1044,104 @@
     if (!s || !s.phaseManager || !window.CoopTeam) return; // no co-op room: nothing is touched
     try {
       hookSave(s);
-      if (s.seed && s.seed !== heldSeed && partyOf(s).length) loadFor(s.seed);
-      if (anyOn()) { watchCombo(); hookPhases(s); hookPokemon(s); }
+      if (s.seed && partyOf(s).length) {
+        // another run, or this seed from an earlier point (the wave or the run's clock went back: loaded again,
+        // or a new run on the same seed): take the items from the save again
+        const wave = (s.currentBattle || {}).waveIndex || 0, time = Number(s.sessionPlayTime) || 0;
+        if (s.seed !== heldSeed || (wave > 0 && wave < runMark.wave) || time < runMark.time) loadFor(s.seed);
+        if (wave > 0) runMark.wave = wave;
+        runMark.time = time;
+      }
+      if (anyOn()) {
+        watchCombo(); hookPhases(s); hookPokemon(s); registerIcons(s);
+        for (const fn of tickFns) guard('tick', () => fn(s));
+      }
     } catch (e) { log('error', String(e)); }
     try { draw(); } catch (e) { log('overlay error', String(e)); }
   }, 200);
 
+  const debugApi = {
+    hooked: () => ({ ...hooked, save: !!(scene() && scene().gameData && scene().gameData.__coopMods) }),
+    held: () => JSON.parse(JSON.stringify(held)),   // { pokemonId: { key: { n, s } } }
+    bag: () => JSON.parse(JSON.stringify(bag)),     // { key: { n, s } }
+    block: () => JSON.parse(JSON.stringify(exportBlock(scene()))), // what the next save will carry
+    // partyIndex: place in the party (ignored for a passive item)
+    give: (partyIndex, key, state) => give(scene().getPlayerParty()[partyIndex], key, state, 'debug'),
+    take: (partyIndex, key, n) => take(scene().getPlayerParty()[partyIndex], key, n == null ? 1 : n),
+    remove: (partyIndex, key) => remove(scene().getPlayerParty()[partyIndex], key),
+    forceReward: keys => { debug.force = [].concat(keys); return debug.force.slice(); },
+    chance: () => Object.fromEntries(Object.keys(items).map(k => { const t = TIER[items[k].tier], pool = POOL[t], same = Object.keys(items).filter(x => TIER[items[x].tier] === t); const w = x => Math.min(Number(items[x].weight) || 0, pool.cap); return [k, w(k) / (pool.total + same.reduce((a, x) => a + w(x), 0))]; })),
+    icons: () => ({ packed: Object.keys(iconData).length, decoded: Object.keys(iconData).filter(k => iconData[k].ok).length, inTexture: iconReg.done.size }),
+    events: () => EVENTS.slice(),
+    battle: B,
+  };
+
+  // ---- engine extensions (engine/ext-*.js, see engine/EXT.md): what an extension gets ----
+  const exts = {}; // name -> 'ok' | the error it failed with
+  const X = {
+    version: API_VERSION,
+    scene, log, uiMode,
+    // the tables (read them, do not write): items 'modId:itemId' -> definition; mods modId -> { manifest, items, ok, ... }
+    items, mods, order,
+    TIER, tierName: t => TIER_ZH[typeof t === 'number' ? t : TIER[t]] || '', tierColor: t => TIER_CSS[typeof t === 'number' ? t : TIER[t]] || '#f8f8f8', kindName: k => KIND_ZH[k] || '',
+    STAT: statApi, cfg,
+    isOn, anyOn, active, itemOn,
+    key: (modId, itemId) => modId + ':' + itemId,
+    // held items and the team bag, by item key. p: the Pokémon (null for a passive item)
+    give: (p, key, state, from) => give(p, key, state, from),
+    take: (p, key, n) => take(p, key, n == null ? 1 : n),
+    remove: (p, key) => remove(p, key),
+    count: (p, key) => (!itemOn(key) ? 0 : items[key].kind === 'passive' ? bagCount(key) : countOf(p, key)), // 0 while the item's mod is off
+    state: (p, key) => { const e = items[key] && items[key].kind === 'passive' ? bag[key] : entryOf(p, key); return e ? e.s : null; },
+    holders: key => (itemOn(key) ? partyOf(scene()).filter(p => holds(p, key)) : []),
+    heldItems: p => shownItems(p), bagItems: () => shownBag(), // [{ key, def, state, count }] of mods that are on
+    canTake,
+    emit, has, listeners,
+    addEvent(name) { if (!/^[a-z][A-Za-z0-9]{2,39}$/.test(name)) throw new Error('bad event name ' + name); if (!EVENTS.includes(name)) EVENTS.push(name); return name; },
+    extendBattle(fns) { const ks = Object.keys(fns || {}); for (const k of ks) if (k in B) throw new Error('api.battle.' + k + ' exists already'); for (const k of ks) B[k] = fns[k]; },
+    extendApi(fn) { if (typeof fn !== 'function') throw new Error('extendApi needs a function (mod, api) => ({ ... })'); apiExt.push(fn); },
+    onTick(fn) { tickFns.push(fn); },
+    onSwitch(fn) { switchFns.push(fn); },
+    // hooks: see wrapOnce / before / after above
+    wrap: (obj, method, tag, make) => wrapOnce(obj, method, tag, make), before, after, guard, protoWith, gameMethod,
+    // fn(p, key, max) -> number: how many of held item `key` Pokémon p may hold (max: the item's own, or what the extension before answered)
+    onMax(fn) { if (typeof fn !== 'function') throw new Error('onMax needs a function (pokemon, key, max) => number'); maxFns.push(fn); },
+    maxOf: (p, key) => maxOf(p, key),
+    // fn(proto, phase) once, when the first phase of that class is about to start (or now, if one already has)
+    phaseClass(name, fn) { (phaseClassFns[name] = phaseClassFns[name] || []).push(fn); if (phaseProtos[name]) guard('phase class ' + name, () => fn(phaseProtos[name], null)); },
+    // fn(proto) once, with the game's Pokemon class (the base of the players' and the enemies' Pokémon)
+    pokemonClass(fn) { pokemonClassFns.push(fn); if (pokemonProto) guard('pokemon class', () => fn(pokemonProto)); },
+    // rewards: fn(phase, options) for every reward list the game makes while a mod is on; return a new list to replace it
+    onRewardOptions(fn) { rewardFns.push(fn); },
+    makeOption, rng, random: B.random,
+    nameOf, battle: B, turnKey, phaseNow, inBattle: () => B.inBattle(),
+    frameOf: key => (items[key] ? frameOf(items[key]) : 'unknown'),
+    redraw() { ov.sig = ''; },
+    debug(name, fn) { if (name in debugApi) throw new Error('CoopMods.debug.' + name + ' exists already'); debugApi[name] = fn; },
+  };
+  window.CoopModsExt = function (name, install) {
+    if (typeof name !== 'string' || !name || typeof install !== 'function') { log('extension refused: CoopModsExt(name, X => { ... })'); return false; }
+    if (name in exts) return false; // injected twice
+    exts[name] = 'installing';
+    try { install(X); exts[name] = 'ok'; log('extension ' + name + ' installed'); return true; } catch (e) {
+      exts[name] = String((e && e.stack) || e).slice(0, 400);
+      log('extension ' + name + ' failed to install, skipped: ' + exts[name]);
+      return false;
+    }
+  };
+
   window.CoopMods = {
     apiVersion: API_VERSION,
-    manifest, define, openPanel, closePanel,
+    manifest, define, icons, openPanel, closePanel,
     list: () => order.map(id => ({ id, name: mods[id].manifest.name, version: mods[id].manifest.version, on: isOn(id), error: mods[id].error, items: mods[id].items.slice() })),
     isOn, setOn,
+    extensions: () => ({ ...exts }),
     // names of the mod items a Pokémon holds (for the phone's team sheet, host-game.js readParty)
-    heldNames: p => shownItems(p).map(it => it.def.name + (it.state && it.state.used ? '(已用)' : '')),
+    heldNames: p => shownItems(p).map(it => it.def.name + (it.count > 1 ? '×' + it.count : '') + (it.state && it.state.used ? '(已用)' : '')),
+    // names of the passive mod items in the team bag (for the phone's team sheet, next to the game's own bag)
+    bagNames: () => shownBag().map(it => it.def.name + (it.count > 1 ? '×' + it.count : '') + (noteOf(it) ? '（' + noteOf(it) + '）' : '')),
+    canTake,
+    tierName: X.tierName,
     // does a mod that is on refuse this move for this Pokémon? (host-game.js greys it out in 2P's pick list)
     moveBlocked(p, moveId) {
       if (!has('moveSelect')) return false;
@@ -653,15 +1149,1677 @@
       return false;
     },
     // for tests from the console; not used by the game or by mods
-    debug: {
-      hooked: () => ({ ...hooked, save: !!(scene() && scene().gameData && scene().gameData.__coopMods) }),
-      held: () => JSON.parse(JSON.stringify(held)),
-      give: (partyIndex, key, state) => give(scene().getPlayerParty()[partyIndex], key, state),
-      remove: (partyIndex, key) => remove(scene().getPlayerParty()[partyIndex], key),
-      forceReward: keys => { debug.force = [].concat(keys); return debug.force.slice(); },
-      chance: () => Object.fromEntries(Object.keys(items).map(k => { const t = TIER[items[k].tier], pool = POOL[t], same = Object.keys(items).filter(x => TIER[items[x].tier] === t); const w = x => Math.min(Number(items[x].weight) || 0, pool.cap); return [k, w(k) / (pool.total + same.reduce((a, x) => a + w(x), 0))]; })),
-      battle: B,
-    },
+    debug: debugApi,
   };
   log('loader ready (interface v' + API_VERSION + ')');
 })();
+
+// ======== engine extension: b1 (engine/ext-b1.js) ========
+// Engine extension of team b1: extra reward screens.
+// A mod can add its own reward screens that come right after a wave's normal reward (issue #2: the 联机道具
+// screen; #25 招式学习器盒; #26 进化之证). The mod says when a screen is due and what is on it; this file does
+// everything that touches the game: queueing the screen behind the wave's reward phase, the list of options,
+// the title on screen, the paid reroll, hiding the shop, and rolling the game's own TMs / evolution items /
+// form-change items for a mod to offer.
+//
+// ---- For mod authors (简体中文，格式同 docs/MOD-API.md；这一段是本扩展给 mod 多加的东西) ----
+//
+// `api.rewardScreen(def)`：加一个「额外的奖励界面」。它排在这一层正常奖励（两位玩家都挑完）之后，
+// 两位玩家照样轮流挑：先挑的人从全部选项里拿 1 个，另一位从剩下的里拿 1 个。界面上方会显示标题。
+// 这个界面没有商店那一排。
+//   id       小写字母、数字、短横线
+//   title    显示在界面上方的标题（中文），hint 是标题下面的一行小字（可以不写）
+//   count    一次出几个选项（1–8）
+//   reroll   true = 左下角可以付费刷新（价格和游戏的刷新一样，从正在挑的那位玩家的钱里扣），不写 = 不能刷新
+//   exclusive  true = 只要这个 mod 开着，所有 mod 道具都不再混进正常奖励，只从这种界面里出
+//   when(ctx)     这一层的正常奖励排上队时问一次：返回 true 就在它后面加这个界面。ctx.wave 是层数
+//   first(ctx)    谁先挑：返回 'p1' / 'p2'；不写或返回别的 = 和正常奖励一样（单数层 2P 先）
+//   options(ctx)  界面要打开时问：返回这次的选项列表（数组）。每一项是一个 mod 道具的 key（`item.key`），
+//                 或者 `api.gameRewards` 给的游戏道具。返回空数组 = 这次不出这个界面。
+//                 ctx: wave 层数、count 要几个、round 第几轮（刷新第二位玩家的那一轮时是 2）、reroll 第几次刷新（0 = 没刷新过）、
+//                 picker 现在轮到谁、random() 给 0 到 1 的数（同一局、同一层、同一次刷新永远一样）
+//   opened(ctx)   界面真的打开了（有东西可挑）时调用一次；一次性的道具在这里 `item.take()`
+//   emptyText     没有东西可出、这次不出界面时显示的一句话（可以不写）
+//   refill        true = 轮到第二位玩家时，剩下的选项里已经没人用得上的（比如第一位刚让那只宝可梦进化了）会被拿掉，
+//                 再问一次 options(ctx)（ctx.round 是 2）补上；不写 = 只拿掉、不补
+// `api.gameRewards({ kinds, tier, max, who, ignoreBracelet })`：队伍里有宝可梦用得上的游戏道具，最多 max 个、互不重复。
+//   kinds: 'tm' 招式学习器、'evolution' 进化道具、'form' 形态变化道具（超级石、极巨菇菇也在这一类），可以写数组；
+//   tier: 'COMMON' / 'GREAT' / 'ULTRA' / 'ROGUE'，游戏给这个道具定的品质；
+//   who: 'p1' / 'p2' = 只看这位玩家的宝可梦用不用得上，不写 = 两位玩家的都算；
+//   ignoreBracelet: true = 没有超级手环 / 极巨腕带时，超级石和极巨菇菇也算。
+//   返回的是游戏自己的对象，只能原样放进 options 的返回值里。只在奖励阶段里能用（options / when 里），别处返回空数组。
+// `api.modItems()`：所有开着的 mod 的道具，`[{ key, mod, id, name, tier, kind, max, canTake(who) }]`。
+// `B.rewardPicker()`：现在奖励界面轮到谁挑，'p1' / 'p2'；不在奖励界面时是 null。
+// `B.sameReward(a, b)`：`api.gameRewards` 给的两个道具是不是同一个（同一个招式学习器、同一块石头）。
+CoopModsExt('b1', X => {
+  const T = 'b1', TAG = '__b1'; // TAG on a reward phase: { id, wave, rr, n?, copy? } = one of our extra screens
+  const screens = {}, ids = []; // id -> definition (with .mod), in the order they were registered
+  let started = new WeakMap(); // Battle object -> Set of screen ids that have started in that battle
+  const dbg = { force: new Set(), wave: null, last: null };
+  let rewardProto = null, rawOptions = null; // SelectModifierPhase.prototype / its getModifierTypeOptions before the extensions and the core wrapped it
+  let rawStart = null, lastRerolls = 0; // its start before we wrapped it / the reroll count of the last reward screen that started
+  let likeOption = null; // any option the game made (for X.makeOption)
+  let ownsOffer = false; // we switched X.cfg.normalOffer off
+
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const isReward = ph => !!ph && ph.phaseName === 'SelectModifierPhase';
+  const tagOf = ph => (isReward(ph) && ph[TAG] && typeof ph[TAG] === 'object' ? ph[TAG] : null);
+  const coopOf = ph => (ph && ph.__coop && typeof ph.__coop === 'object' ? ph.__coop : null); // host-team.js's tag (true on untagged phases)
+  const defOf = ph => { const t = tagOf(ph), d = t && screens[t.id]; return d && X.isOn(d.mod) ? d : null; };
+  const current = () => { try { return X.scene().phaseManager.getCurrentPhase(); } catch { return null; } };
+  const waveNow = () => (dbg.wave != null ? dbg.wave : ((X.scene().currentBattle || {}).waveIndex) || 0);
+  const other = w => (w === 'p1' ? 'p2' : 'p1');
+  const teamCount = w => { try { return window.CoopTeam.count(w); } catch { return 1; } };
+  const settings = def => ({ guaranteedModifierTypeOptions: [], fillRemaining: false, allowLuckUpgrades: false, rerollMultiplier: def && def.reroll ? undefined : -1 });
+
+  // ---- what mods get ----
+  const TIERS = ['COMMON', 'GREAT', 'ULTRA', 'ROGUE', 'MASTER'];
+  const KINDS = { tm: ['TM_COMMON', 'TM_GREAT', 'TM_ULTRA'], evolution: ['EVOLUTION_ITEM', 'RARE_EVOLUTION_ITEM'], form: ['FORM_CHANGE_ITEM', 'RARE_FORM_CHANGE_ITEM'] };
+  const ACCESS = ['MegaEvolutionAccessModifier', 'GigantamaxAccessModifier']; // 超级手环, 极巨腕带
+  const hash = str => { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  // one real reward option of that rarity from the game's own generator (the pool a normal reward uses), or null
+  function rollOne(tier) {
+    const fake = Object.create(rewardProto);
+    fake.__coop = null; fake[TAG] = null; // not a co-op round, not one of ours: nobody's offer or swap applies
+    fake.modifierTiers = undefined; fake.rerollCount = 0; fake.isCopy = false;
+    fake.customModifierSettings = { guaranteedModifierTiers: [tier], allowLuckUpgrades: false };
+    const list = rawOptions.call(fake, 1);
+    const o = Array.isArray(list) ? list[0] : null;
+    return o && o.type ? o : null;
+  }
+  // The game works out what every entry of the reward pool weighs when a reward screen starts, from the party and
+  // the items of that moment, and keeps it until the next screen. An entry it found nothing for then (a mega stone
+  // while nobody could use one, with another Pokémon already holding a stone) weighs 0 and cannot be rolled later.
+  // This makes the game weigh the pool again now: the first lines of its own start(), stopped before the screen.
+  const STOP = {};
+  function reweigh(rerolls) {
+    if (!rawStart || !rewardProto) return false;
+    const s = X.scene(), fake = Object.create(rewardProto), had = own(s, 'reroll'), was = s.reroll;
+    fake.__coop = null; fake[TAG] = null;
+    fake.rerollCount = Math.max(0, Number(rerolls) || 0); fake.isCopy = false; fake.modifierTiers = undefined; fake.customModifierSettings = undefined;
+    fake.isPlayer = () => true;
+    fake.updateSeed = () => {}; // not a new screen: the wave's seed stays as it is
+    fake.getModifierCount = fake.getModifierTypeOptions = () => { throw STOP; }; // what start() does right after weighing
+    try { rawStart.call(fake); } catch (e) { if (e === STOP) return true; throw e; } finally { if (had) s.reroll = was; else delete s.reroll; }
+    return false;
+  }
+  const rewardKey = o => o.type.id + ':' + (o.type.moveId != null ? o.type.moveId : o.type.evolutionItem != null ? o.type.evolutionItem : o.type.formChangeItem != null ? o.type.formChangeItem : o.type.name);
+  // Game items somebody in the party can use, found by rolling the game's generators (which only make what the
+  // party can use). Own random stream by wave and arguments: the same call gives the same list after a reload,
+  // and the game's random numbers are where they were afterwards.
+  function gameRewards(spec) {
+    const out = [];
+    const o = spec || {}, tier = TIERS.indexOf(o.tier), max = Math.max(1, Math.min(Math.floor(Number(o.max) || 8), 24));
+    const want = [].concat(o.kinds || []).reduce((a, k) => a.concat(KINDS[k] || []), []);
+    const s = X.scene();
+    if (tier < 0 || tier > 3 || !want.length || !rewardProto || !rawOptions || !s || !s.currentBattle || typeof s.executeWithSeedOffset !== 'function') return out;
+    const who = o.who === 'p1' || o.who === 'p2' ? o.who : null;
+    const weigh = want.some(id => !KINDS.tm.includes(id)), offset = 7000 + (hash([tier, want.join(), o.ignoreBracelet ? 1 : 0, who || ''].join('|')) % 9000);
+    const seen = new Set(), quiet = console.log, hadGm = own(s, 'getModifiers'), gm = s.getModifiers, hadGp = own(s, 'getPlayerParty'), gp = s.getPlayerParty;
+    console.log = () => {}; // the game logs twice per roll
+    try {
+      // one player's Pokémon only: for the length of these rolls the party the generators are given is theirs
+      if (who && window.CoopTeam && typeof gp === 'function') s.getPlayerParty = function () {
+        const all = gp.apply(this, arguments);
+        return Array.isArray(all) ? all.filter(p => window.CoopTeam.ownerOf(p) === who) : all;
+      };
+      // the game only offers a mega stone / Max Mushrooms when the team has the bracelet / band; the stones work
+      // without it. For the length of these rolls the two "have you got it" questions are answered yes.
+      if (o.ignoreBracelet && typeof gm === 'function') s.getModifiers = function (cls) {
+        const r = gm.apply(this, arguments);
+        return Array.isArray(r) && !r.length && cls && ACCESS.includes(cls.name) ? [{}] : r;
+      };
+      s.executeWithSeedOffset(() => {
+        if (weigh) reweigh(0); // evolution and form items: by the party as it is now (and as the two lines above show it)
+        for (let i = 0; i < 400 && out.length < max; i++) {
+          const opt = rollOne(tier);
+          if (!opt || !want.includes(opt.type.id)) continue;
+          const k = rewardKey(opt);
+          if (!seen.has(k)) { seen.add(k); out.push(opt); }
+        }
+      }, offset, s.waveSeed);
+    } catch (e) {
+      console.log = quiet;
+      X.log('b1: rolling game rewards failed (' + String(e).slice(0, 120) + ')'); // e.g. no reward screen yet in this session
+    } finally {
+      console.log = quiet;
+      if (hadGm) s.getModifiers = gm; else delete s.getModifiers;
+      if (hadGp) s.getPlayerParty = gp; else delete s.getPlayerParty;
+      // and the weights go back to what the game itself would have for the real party and items
+      if (weigh) try { s.executeWithSeedOffset(() => { reweigh(lastRerolls); }, offset, s.waveSeed); } catch (e) { X.log('b1: weighing the reward pool again failed (' + String(e).slice(0, 120) + ')'); }
+    }
+    if (out[0]) likeOption = out[0];
+    return out;
+  }
+  const modItems = () => Object.keys(X.items).filter(X.itemOn).map(key => {
+    const it = X.items[key];
+    return { key, mod: it.mod, id: it.id, name: it.name, tier: it.tier, kind: it.kind, max: it.max, canTake: who => X.canTake(key, who) };
+  });
+  function rewardScreen(mod, def) {
+    if (!def || !/^[a-z0-9][a-z0-9-]{1,39}$/.test(def.id || '')) throw new Error('rewardScreen: id must be lowercase letters, digits and -');
+    const id = def.id;
+    if (screens[id]) throw new Error('rewardScreen ' + id + ' defined twice');
+    if (!def.title || typeof def.options !== 'function' || typeof def.when !== 'function') throw new Error('rewardScreen ' + id + ': title, when(ctx) and options(ctx) are required');
+    const count = Math.floor(Number(def.count));
+    if (!(count >= 1 && count <= 8)) throw new Error('rewardScreen ' + id + ': count must be a whole number from 1 to 8');
+    screens[id] = { id, mod: mod.id, title: String(def.title), hint: def.hint ? String(def.hint) : '', count, reroll: !!def.reroll, exclusive: !!def.exclusive,
+      when: def.when, first: typeof def.first === 'function' ? def.first : null, options: def.options, opened: typeof def.opened === 'function' ? def.opened : null,
+      emptyText: def.emptyText ? String(def.emptyText) : '', refill: !!def.refill };
+    ids.push(id);
+    return id;
+  }
+  X.extendApi((mod, api) => ({ rewardScreen: def => rewardScreen(mod, def), gameRewards, modItems }));
+  X.extendBattle({
+    rewardPicker: () => { const c = coopOf(current()); return isReward(current()) && c && (c.picker === 'p1' || c.picker === 'p2') ? c.picker : null; },
+    // are two results of api.gameRewards the same item (the same TM, the same stone)?
+    sameReward: (a, b) => !!(a && b && a.type && b.type) && X.guard('b1 sameReward', () => rewardKey(a) === rewardKey(b), false),
+  });
+
+  // mod items leave the normal reward while a mod with an `exclusive` screen is on (issue #2)
+  function syncOffer() {
+    const want = ids.some(id => screens[id].exclusive && X.isOn(screens[id].mod));
+    if (want && X.cfg.normalOffer) { X.cfg.normalOffer = false; ownsOffer = true; X.log('b1: mod items only on their own reward screen now (normal offer off)'); }
+    else if (!want && ownsOffer) { X.cfg.normalOffer = true; ownsOffer = false; X.log('b1: normal offer of mod items back on'); }
+  }
+  // A mod is switched off. From then on none of the wraps below is reached (the core calls the game's own
+  // methods directly), so what this file has put into the game has to come out here:
+  // - its screens that are still waiting in the queue. Left there, each would start as the game's own reward
+  //   screen with an empty list: the shop and nothing else, once per player (seen on the rig);
+  // - the title of a screen of its that is up right now (the title is taken off in the wrap of clear(); left
+  //   there it stays over the shop row of every later reward screen).
+  // A screen that is up stays up as the game's own: what is on it can still be taken.
+  function modOff(modId) {
+    const s = X.scene(), pm = s && s.phaseManager;
+    if (!pm) return;
+    const mine = p => { const t = tagOf(p), d = t && screens[t.id]; return !!d && d.mod === modId; };
+    let n = 0;
+    if (typeof pm.tryRemovePhase === 'function') while (n < 24 && pm.tryRemovePhase('SelectModifierPhase', mine)) n++;
+    if (n) X.log('b1: mod ' + modId + ' switched off, ' + n + ' waiting screen(s) of it taken out of the queue');
+    const h = ((s.ui && s.ui.handlers) || []).find(x => x && x.__b1Title);
+    if (h && !defOf(current())) eraseTitle(h); // (not the title of a screen whose mod is still on)
+  }
+  X.onSwitch((modId, on) => X.guard('b1 switch', () => { syncOffer(); if (!on) modOff(modId); }));
+
+  // ---- queueing: an extra screen goes right behind the wave's reward phase, the same way that one was queued ----
+  // (so everything the normal reward spawns - the second player's round, a TM's learn-move phase and its copy,
+  // a reroll - runs before it, and the next battle after it)
+  const isBase = ph => isReward(ph) && !ph.isCopy && !ph.rerollCount && !ph[TAG] && !!coopOf(ph) && coopOf(ph).round === 1;
+  function queueExtras(pm, add) {
+    const s = X.scene(), b = s.currentBattle;
+    if (!b) return;
+    const done = started.get(b), wave = waveNow();
+    for (const id of ids) {
+      const def = screens[id];
+      if (!X.isOn(def.mod) || (done && done.has(id))) continue;
+      if (pm.hasPhaseOfType('SelectModifierPhase', p => !!p[TAG] && p[TAG].id === id)) continue;
+      const due = dbg.force.has(id) || X.guard('b1 when ' + id, () => !!def.when({ wave }), false);
+      if (!due) continue;
+      const ph = pm.create('SelectModifierPhase', 0, undefined, settings(def), false);
+      ph[TAG] = { id, wave, rr: 0 };
+      add.call(pm, ph);
+      X.log('b1: screen ' + id + ' queued behind the reward of wave ' + wave);
+    }
+  }
+  function hookManager(s) {
+    const pm = s.phaseManager;
+    for (const method of ['pushPhase', 'unshiftPhase']) {
+      X.wrap(pm, method, T, orig => function (...phases) {
+        const r = orig.apply(this, phases);
+        X.guard('b1 queue', () => { if (ids.length && phases.some(isBase)) queueExtras(this, orig); });
+        return r;
+      });
+    }
+    // phases made while one of our screens is up: the game's copy (kept while a TM is being learned) and
+    // host-team.js's second round stay ours; a reroll (which the game makes as an ordinary random reward)
+    // becomes a new list of the same screen
+    X.wrap(pm, 'create', T, orig => function (name, ...args) {
+      if (name !== 'SelectModifierPhase') return orig.call(this, name, ...args);
+      let tag = null;
+      X.guard('b1 create', () => {
+        const cur = this.getCurrentPhase(), t = tagOf(cur);
+        if (!t) return;
+        if (args[3] === true) tag = { id: t.id, wave: t.wave, rr: t.rr || 0, copy: true, refilled: !!t.refilled };
+        else if (args[0] > 0) {
+          tag = { id: t.id, wave: t.wave, rr: (t.rr || 0) + 1, n: (cur.typeOptions || []).length };
+          args[1] = undefined;
+          args[2] = settings(screens[t.id]);
+        }
+      });
+      const ph = orig.call(this, name, ...args);
+      if (tag && ph) ph[TAG] = tag;
+      return ph;
+    });
+  }
+
+  // ---- a screen starts ----
+  function contextFor(ph, tag, def, c, n) {
+    const s = X.scene(), round = c.round === 2 ? 2 : 1;
+    return { wave: tag.wave, count: n, round, reroll: tag.rr || 0, picker: c.picker, random: X.rng([s.seed, tag.wave, 'b1', def.id, round, tag.rr || 0].join(':')) };
+  }
+  // what a mod's options(ctx) returned -> reward options the screen can show, at most n, none twice, none of `have`
+  function toOptions(list, n, have) {
+    const opts = [], seen = new Set((have || []).map(optKey));
+    for (const x of Array.isArray(list) ? list : []) {
+      if (opts.length >= n) break;
+      let opt = null;
+      if (typeof x === 'string') { if (X.itemOn(x) && !seen.has('mod:' + x)) opt = X.makeOption(likeOption, x, 0); }
+      else if (x && typeof x === 'object' && x.type && typeof x.type.name === 'string' && !seen.has(optKey(x))) opt = x;
+      if (opt) { seen.add(optKey(opt)); opts.push(opt); }
+    }
+    return opts;
+  }
+  const optKey = o => (o.type.__coopMod ? 'mod:' + o.type.__coopMod : 'game:' + rewardKey(o));
+  // can anybody in the party still use this option? (a game item that goes on a Pokémon says so itself)
+  function usable(opt) {
+    const type = opt && opt.type;
+    if (!type) return false;
+    if (type.__coopMod) return X.itemOn(type.__coopMod);
+    if (typeof type.selectFilter !== 'function') return true;
+    return X.scene().getPlayerParty().some(p => { try { return type.selectFilter(p) === null; } catch { return true; } });
+  }
+  // 'go': show it; 'skip': nothing to show, end the phase without opening anything
+  function prepare(ph, tag) {
+    const def = defOf(ph), c = coopOf(ph), s = X.scene();
+    if (!def || !c) return 'skip'; // its mod was switched off meanwhile, or host-team.js did not tag it
+    if (ph.isCopy) { // a copy shows the list it was made with (the second round: what the first player left)
+      const cs = ph.customModifierSettings, list = cs && Array.isArray(cs.guaranteedModifierTypeOptions) ? cs.guaranteedModifierTypeOptions : [];
+      // what nobody can use any more is taken off (the first player's pick may have evolved the Pokémon it was for)
+      let rest = list.filter(usable);
+      if (c.round === 2 && !tag.refilled) {
+        tag.refilled = true;
+        if (def.refill && rest.length < list.length) {
+          const more = X.guard('b1 refill ' + def.id, () => def.options(contextFor(ph, tag, def, c, list.length)), []);
+          rest = rest.concat(toOptions(more, list.length - rest.length, rest).filter(usable));
+        }
+      }
+      if (cs && (rest.length !== list.length || rest.some((o, i) => o !== list[i]))) { // (a refilled list has the old length)
+        X.log('b1: screen ' + def.id + ': ' + list.filter(o => !rest.includes(o)).length + ' of the ' + list.length + ' left can no longer be used; now: ' + (rest.map(o => o.type.name).join(' | ') || 'nothing'));
+        cs.guaranteedModifierTypeOptions = rest;
+      }
+      tag.empty = !rest.length;
+      return rest.length ? 'go' : 'skip'; // no shop on these screens: an empty round has nothing
+    }
+    const first = !tag.rr;
+    if (first && s.currentBattle) { // from here on this battle has had this screen (looked at when another reward phase is queued)
+      let done = started.get(s.currentBattle);
+      if (!done) started.set(s.currentBattle, done = new Set());
+      done.add(def.id);
+      dbg.force.delete(def.id);
+    }
+    if (first) {
+      let who = def.first ? X.guard('b1 first ' + def.id, () => def.first({ wave: tag.wave }), null) : null;
+      if (who !== 'p1' && who !== 'p2') who = c.picker;
+      if ((who === 'p1' || who === 'p2') && !teamCount(who) && teamCount(other(who))) who = other(who); // nobody to give an item to
+      if (who === 'p1' || who === 'p2') c.picker = who;
+    }
+    const n = first ? def.count : Math.max(1, Math.min(Number(tag.n) || def.count, 8));
+    const ctx = contextFor(ph, tag, def, c, n);
+    const opts = toOptions(X.guard('b1 options ' + def.id, () => def.options(ctx), []), n);
+    tag.empty = !opts.length;
+    if (!opts.length) return 'skip';
+    ph.customModifierSettings = settings(def);
+    ph.customModifierSettings.guaranteedModifierTypeOptions = opts; // the game shows a set list as it is
+    tag.opts = opts;
+    X.log('b1: screen ' + def.id + ' wave ' + tag.wave + (tag.rr ? ' reroll ' + tag.rr : '') + ', ' + (c.picker === 'p1' ? '1P' : '2P') + ' picks' + (c.round === 2 ? ' (second round)' : ' first') + ': ' + opts.map(o => o.type.name).join(' | '));
+    if (first && def.opened) X.guard('b1 opened ' + def.id, () => def.opened(ctx));
+    return 'go';
+  }
+  function skip(ph) {
+    const c = coopOf(ph), tag = tagOf(ph) || {}, def = defOf(ph);
+    if (c) c.ended = true; // host-team.js: no second round for a screen that never opened
+    X.log('b1: screen ' + tag.id + ' has nothing to show, skipped');
+    // tell the players why nothing comes up (shown right after this phase)
+    X.guard('b1 skip text', () => {
+      const text = !def || !tag.empty ? '' : ph.isCopy ? '「' + def.title + '」里没有剩下能用的道具了。' : def.emptyText;
+      if (text) X.scene().phaseManager.queueMessage(text, 1500); // stays up a moment after it is written out, no button needed
+    });
+    return ph.end();
+  }
+  X.phaseClass('SelectModifierPhase', proto => {
+    // the two methods as they were before the core or any extension wrapped them (whatever the install order)
+    if (proto !== rewardProto) { rewardProto = proto; rawOptions = X.gameMethod(proto, 'getModifierTypeOptions'); rawStart = X.gameMethod(proto, 'start'); }
+    X.wrap(proto, 'start', T, orig => function () {
+      const tag = tagOf(this);
+      if (!this.isCopy) lastRerolls = Number(this.rerollCount) || 0; // (a copy keeps the weights of the screen it copies)
+      if (!tag) return orig.apply(this, arguments);
+      const what = X.guard('b1 screen start', () => prepare(this, tag), 'skip');
+      return what === 'go' ? orig.apply(this, arguments) : skip(this);
+    });
+    // the list on screen is the one prepared above, whatever was added to it on the way (金色精灵球, 银色之羽: issue #2)
+    X.before(proto, 'resetModifierSelect', T, self => {
+      const tag = tagOf(self);
+      if (!tag || self.isCopy || !Array.isArray(tag.opts) || !Array.isArray(self.typeOptions)) return;
+      if (self.typeOptions.length !== tag.opts.length || self.typeOptions.some((o, i) => o !== tag.opts[i])) {
+        X.log('b1: screen ' + tag.id + ': the list was changed on the way (' + self.typeOptions.length + ' options), put back to its ' + tag.opts.length);
+        self.typeOptions = tag.opts.slice();
+      }
+    });
+    // price of the reroll: the game's own (never the Lock Capsule's price: the screen has its own odds), or none
+    X.wrap(proto, 'getRerollCost', T, orig => function () {
+      if (!tagOf(this)) return orig.apply(this, arguments);
+      const def = defOf(this);
+      return def && def.reroll ? orig.call(this, false) : -1;
+    });
+  });
+
+  // ---- on screen: the title, and no shop row ----
+  function label(s, str, color, size) {
+    return new Phaser.GameObjects.Text(s, 0, 0, str, { fontFamily: 'emerald', fontSize: size, color, padding: { bottom: 6 } }).setScale(1 / 6).setShadow(3, 4, '#0b0910', 0, false, true);
+  }
+  function eraseTitle(h) {
+    const t = h.__b1Title;
+    h.__b1Title = null;
+    if (t && t.scene) t.destroy();
+  }
+  function drawTitle(h, def) {
+    const s = X.scene();
+    eraseTitle(h);
+    if (!window.Phaser || !h.modifierContainer) return;
+    const c = new Phaser.GameObjects.Container(s, 160, -164); // the band the shop row normally uses; UI coordinates, y up from the bottom edge
+    const title = label(s, '— ' + def.title + ' —', '#f8d038', 96).setOrigin(0.5, 0);
+    const hint = def.hint ? label(s, def.hint, '#f8f8f8', 54).setOrigin(0.5, 0) : null;
+    const w = Math.ceil(Math.max(title.displayWidth, hint ? hint.displayWidth : 0)) + 14, th = Math.ceil(title.displayHeight);
+    const hgt = th + (hint ? Math.ceil(hint.displayHeight) : 0) + 3;
+    const g = new Phaser.GameObjects.Graphics(s);
+    g.fillStyle(0x1d1824, 0.88).fillRoundedRect(-w / 2, 0, w, hgt, 3);
+    g.lineStyle(1, 0xf8d038, 0.9).strokeRoundedRect(-w / 2, 0, w, hgt, 3);
+    title.setPosition(0, 1);
+    c.add([g, title]);
+    if (hint) { hint.setPosition(0, th); c.add(hint); }
+    h.modifierContainer.add(c);
+    h.__b1Title = c;
+    c.setAlpha(0);
+    s.tweens.add({ targets: c, alpha: 1, duration: 300 });
+  }
+  // six options are 40 px apart and a TM's full name is twice that: under the icon only the move's name
+  // (the name box above the description still shows the full name of the option the cursor is on)
+  function shortLabels(h) {
+    if (!Array.isArray(h.options) || h.options.length < 5) return;
+    for (const o of h.options) {
+      const name = o && o.modifierTypeOption && o.modifierTypeOption.type && o.modifierTypeOption.type.name, i = typeof name === 'string' ? name.lastIndexOf(' - ') : -1;
+      if (i > 0 && o.itemText && typeof o.itemText.setText === 'function') o.itemText.setText(name.slice(i + 3));
+    }
+  }
+  const ballsClosed = h => (h.options || []).some(o => o && o.pb && o.pb.scene && o.pb.frame && !/_open$/.test(String(o.pb.frame.name)));
+  function hookScreen(s) {
+    const h = ((s.ui && s.ui.handlers) || []).find(x => x && x.constructor && x.constructor.name === 'ModifierSelectUiHandler');
+    if (!h) return;
+    X.wrap(h, 'show', T, orig => function (args) {
+      const def = defOf(current());
+      if (!this.active) this.__b1Hold = null; // a new screen: new balls to wait for (see processInput below)
+      if (!def || this.active || !Array.isArray(args) || args.length !== 4) return orig.apply(this, arguments);
+      // the handler asks the game mode once, right at the start of show(), whether there is a shop
+      let back = null;
+      X.guard('b1 no shop', () => {
+        const gm = X.scene().gameMode, had = own(gm, 'getShopStatus'), prev = gm.getShopStatus;
+        gm.getShopStatus = () => false;
+        back = () => { if (had) gm.getShopStatus = prev; else delete gm.getShopStatus; };
+      });
+      this.__b1Hold = null;
+      let r;
+      try { r = orig.apply(this, arguments); } finally { if (back) X.guard('b1 shop back', back); }
+      if (r) X.guard('b1 title', () => { drawTitle(this, def); shortLabels(this); });
+      return r;
+    });
+    X.wrap(h, 'clear', T, orig => function () {
+      X.guard('b1 title off', () => eraseTitle(this));
+      return orig.apply(this, arguments);
+    });
+    // The game takes input a moment before the last ball has opened, and each option still has a timer that
+    // opens its ball. Leaving the screen in that moment (a reroll, a pick, a skip) destroys the options under
+    // those timers; the timer then throws inside the game loop and the game stands still (seen on the game's
+    // own reward screen as well, with every mod off: notes/requests-b1.md). While a mod is on, 确认 and 取消 wait
+    // on every reward screen (ours and the game's own) until every ball is open, at most 3 s after the first
+    // press that came too early. With every mod off this wrap is not reached and the game is as it was.
+    X.wrap(h, 'processInput', T, orig => function (button) {
+      if ((button === 5 || button === 6) && this.awaitingActionInput && isReward(current())) {
+        const early = X.guard('b1 balls', () => {
+          if (!ballsClosed(this)) return false;
+          if (this.__b1Hold == null) this.__b1Hold = Date.now();
+          return Date.now() - this.__b1Hold < 3000;
+        }, false);
+        if (early) return false;
+      }
+      return orig.apply(this, arguments);
+    });
+  }
+
+  X.onTick(s => { syncOffer(); if (!ids.length) return; hookManager(s); hookScreen(s); });
+
+  // ---- for tests (CoopMods.debug.*) ----
+  X.debug('b1Force', list => { dbg.force = new Set([].concat(list || [])); return [...dbg.force]; }); // these screens come with the next reward, whatever when() says
+  X.debug('b1Wave', n => { dbg.wave = n == null ? null : Number(n); return dbg.wave; }); // the wave number the mods are told (null: the real one)
+  X.debug('b1NewBattle', () => { started = new WeakMap(); return true; }); // forget which screens this battle has had
+  X.debug('b1Rewards', spec => gameRewards(spec).map(o => [o.type.id, o.type.tier, o.type.name]));
+  X.debug('b1Offer', v => { if (v != null) X.cfg.normalOffer = !!v; return X.cfg.normalOffer; }); // (the next tick puts it back)
+  // what a screen's options(ctx) gives, without opening anything: [[key or game id, tier, name], ...]
+  X.debug('b1Options', (id, wave, n, rr, round) => {
+    const def = screens[id], s = X.scene();
+    if (!def) return null;
+    const w = wave == null ? waveNow() : wave, r = round === 2 ? 2 : 1;
+    const ctx = { wave: w, count: n || def.count, round: r, reroll: rr || 0, picker: 'p1', random: X.rng([s.seed, w, 'b1', id, r, rr || 0].join(':')) };
+    return toOptions(def.options(ctx), ctx.count).map(o => [o.type.__coopMod || o.type.id, o.type.tier, o.type.name]);
+  });
+  X.debug('b1State', () => {
+    const s = X.scene(), pm = s.phaseManager, ph = pm.getCurrentPhase(), h = s.ui.getHandler(), c = coopOf(ph), b = s.currentBattle;
+    const queued = []; try { for (const lv of pm.phaseQueue.levels) for (const p of lv) if (isReward(p)) queued.push(p[TAG] ? p[TAG].id + (p[TAG].copy ? '(copy)' : '') : 'normal'); } catch {}
+    return {
+      screens: ids.slice(), normalOffer: X.cfg.normalOffer, wave: waveNow(), queued, started: b && started.get(b) ? [...started.get(b)] : [],
+      phase: ph && ph.phaseName, tag: tagOf(ph) ? { id: ph[TAG].id, rr: ph[TAG].rr, n: ph[TAG].n, copy: !!ph[TAG].copy } : null,
+      coop: c ? { round: c.round, picker: c.picker, set: !!c.set } : null,
+      options: isReward(ph) && Array.isArray(ph.typeOptions) ? ph.typeOptions.map(o => [o.type.__coopMod || o.type.id, o.type.tier, o.type.name]) : null,
+      cost: isReward(ph) && Array.isArray(ph.typeOptions) ? ph.getRerollCost(false) : null,
+      ui: h && h.constructor.name === 'ModifierSelectUiHandler' ? { options: h.options.length, shop: h.shopOptionsRows.map(r => r.length), rerollCost: h.rerollCost, title: !!(h.__b1Title && h.__b1Title.scene), row: h.rowCursor, cursor: h.cursor } : null,
+    };
+  });
+});
+
+// ======== engine extension: b2 (engine/ext-b2.js) ========
+// Engine extension of team b2: what the five team-bag items of better-coop-items v0.9 need from the game.
+//   肉鸽骰子 rogue-dice #17        SelectModifierPhase.getRerollCost / rerollModifiers + the price label of the reward screen
+//   银色之羽 silver-wing #23       SelectModifierPhase.getModifierCount
+//   虹色之羽 rainbow-wing #24      the party's luck: SelectModifierPhase.getModifierTypeOptions, scene.updateAndShowText, Arena.randomSpecies
+//   小小花束 tiny-bouquet #13      one more hidden roll of the reward screen that only a mint comes out of
+//   捕捉口袋 catching-pocket #19   AttemptCapturePhase.start / failCatch
+// The numbers (3 free rerolls, +1 option, +3 luck, x1.1, 30%) are the mod's (mod/items/b2.js); this file only
+// turns the game into six events a mod can answer: rewardCount, rerollCost, rerolled, teamLuck, mintRate,
+// ballThrown (described for mod authors in notes/requests-b2.md, to be taken into docs/MOD-API.md).
+// Every hook passes through when nobody listens to its event, and an error in our part falls back to what
+// the game (or the extension before us) answered.
+CoopModsExt('b2', X => {
+  const B = X.battle;
+  const EVENTS = ['rewardCount', 'rerollCost', 'rerolled', 'teamLuck', 'mintRate', 'ballThrown'];
+  EVENTS.forEach(n => X.addEvent(n));
+
+  const scene = () => X.scene();
+  const st = { // counters for tests (CoopMods.debug.b2())
+    wraps: {}, count: 0, quotes: 0, rerolls: 0, free: 0, luckCalls: 0, luckSpecies: 0, shadows: 0, mintsFound: 0, mintsPut: 0, throws: 0, kept: 0, last: {},
+  };
+  const dbg = { mintRate: null }; // test override: a mint multiplier, whatever the mods say
+  // every listener's answer to an event (X.emit only gives the last one); a listener's error is logged, not passed on
+  function answers(name, ev) {
+    const out = [];
+    if (!X.has(name)) return out;
+    for (const [m, fn] of X.listeners(name)) {
+      const r = X.guard('b2 ' + name + ' (' + ((m && m.id) || '?') + ')', () => fn(ev));
+      if (r !== undefined && r !== null) out.push(r);
+    }
+    return out;
+  }
+  // what a mod is told about the reward screen it is asked about
+  function info(ph) {
+    const c = ph && typeof ph.__coop === 'object' && ph.__coop ? ph.__coop : null; // host-team.js's tag (true on the prototype: not a tag)
+    return { wave: B.wave(), round: c ? c.round || 0 : 0, picker: c ? c.picker || null : null, rerolls: (ph && ph.rerollCount) || 0, normal: !!ph && !ph.customModifierSettings };
+  }
+  const isDaily = () => { const s = scene(); return !!(s && s.gameMode && s.gameMode.isDaily); };
+
+  // ---------------------------------------------------------------------------------------------------------
+  // rerollCost / rerolled: the price of 刷新商店
+  // A reroll that a mod made free does not count when the game doubles the price (2 ** rerollCount): after
+  // three free ones the first paid reroll costs what the first reroll of the screen costs. The phase's own
+  // rerollCount is never changed for anybody else (the seed rule, host-team.js's tag and the Voucher weight
+  // read it); only the price calculation sees the smaller number, for the length of that one call.
+  // A chain = one screen and its rerolls: it starts with rerollCount 0 and every reroll makes a phase with one
+  // more. `chain` remembers the free rerolls of the chain on screen; a phase that is not the next link of it
+  // (another wave, another round, a count that does not follow) gets the game's plain price.
+  const chain = { wave: -1, round: -1, rc: 0, free: 0 };
+  const roundOf = ph => info(ph).round;
+  const freeIn = ph => (chain.free > 0 && ph.rerollCount > 0 && ph.rerollCount === chain.rc && chain.wave === B.wave() && chain.round === roundOf(ph) ? Math.min(chain.free, ph.rerollCount) : 0);
+  const quotes = new WeakMap(); // phase -> the last { price, cost, label } we answered for it
+  function gamePrice(ph, orig, args) {
+    const rc = ph.rerollCount, u = freeIn(ph);
+    if (!u) return orig.apply(ph, args);
+    ph.rerollCount = rc - u;
+    try { return orig.apply(ph, args); } finally { ph.rerollCount = rc; }
+  }
+  function quote(ph, price, lock) {
+    const q = { price, cost: price, label: null };
+    if (!(price > 0)) return q; // -1: no reroll on this screen; 0: free already
+    const ev = { cost: price, price, lock: !!lock, ...info(ph) };
+    for (const r of answers('rerollCost', ev)) {
+      const c = typeof r === 'number' ? r : r && typeof r === 'object' ? r.cost : NaN;
+      if (!Number.isFinite(c)) continue;
+      q.cost = ev.cost = Math.max(0, Math.min(Math.floor(c), q.cost)); // a mod can make it cheaper, never dearer
+      if (r && typeof r === 'object' && r.label != null) q.label = String(r.label);
+    }
+    if (q.cost === q.price) q.label = null;
+    return q;
+  }
+  X.phaseClass('SelectModifierPhase', proto => {
+    st.wraps.getRerollCost = X.wrap(proto, 'getRerollCost', 'b2', orig => function (lock) {
+      const self = this, args = arguments;
+      if (!X.has('rerollCost') && !freeIn(self)) return orig.apply(self, args);
+      let price, got = false;
+      const q = X.guard('b2 getRerollCost', () => { price = gamePrice(self, orig, args); got = true; return quote(self, price, lock); }, null);
+      if (!q) return got ? price : orig.apply(self, args);
+      st.quotes++; st.last.quote = q;
+      quotes.set(self, q);
+      return q.cost;
+    });
+    st.wraps.rerollModifiers = X.wrap(proto, 'rerollModifiers', 'b2', orig => function () {
+      const self = this;
+      let q = null;
+      X.guard('b2 reroll (before)', () => {
+        if (!X.has('rerollCost') && !X.has('rerolled') && !freeIn(self)) return;
+        quotes.delete(self);
+        self.getRerollCost(scene().lockModifierTiers); // the same question the game asks next: leaves our quote
+        q = quotes.get(self) || null;
+      });
+      const ok = orig.apply(self, arguments); // true only when the reroll really happened (enough money, allowed)
+      if (ok) X.guard('b2 reroll (after)', () => {
+        const free = !!q && q.price > 0 && q.cost === 0;
+        const before = freeIn(self); // free rerolls so far in this chain (0 for the first reroll of a screen)
+        chain.wave = B.wave(); chain.round = roundOf(self); chain.rc = (self.rerollCount || 0) + 1; chain.free = before + (free ? 1 : 0);
+        st.rerolls++; if (free) st.free++;
+        if (q) X.emit('rerolled', { cost: q.cost, price: q.price, free, ...info(self) });
+      });
+      return ok;
+    });
+  });
+  // the label under 刷新商店: the game writes ₽<cost>; a mod that made the reroll cheaper may give its own words
+  let labelDone = false;
+  function hookLabel(s) {
+    if (labelDone || !s.ui || !Array.isArray(s.ui.handlers)) return;
+    const h = s.ui.handlers.find(x => x && x.constructor && x.constructor.name === 'ModifierSelectUiHandler');
+    const proto = h && X.protoWith(h, 'updateRerollCostText');
+    if (!proto) return;
+    labelDone = true;
+    st.wraps.updateRerollCostText = X.after(proto, 'updateRerollCostText', 'b2', self => {
+      if (!X.has('rerollCost')) return;
+      const ph = scene().phaseManager.getCurrentPhase(), q = ph && quotes.get(ph);
+      if (!q || !q.label || self.rerollCost !== q.cost || !self.rerollCostText) return;
+      self.rerollCostText.setText(q.label);
+      st.last.label = q.label;
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // rewardCount: how many options the normal reward after a battle shows. Not asked for a set list (a
+  // phase with customModifierSettings: boss and rival rewards, mystery encounters, the second player's round,
+  // the screens other extensions build), where the list is fixed anyway.
+  X.phaseClass('SelectModifierPhase', proto => {
+    st.wraps.getModifierCount = X.after(proto, 'getModifierCount', 'b2', (self, args, n) => {
+      if (self.customModifierSettings || !X.has('rewardCount') || !(n > 0)) return;
+      let count = n;
+      const ev = { count: n, ...info(self) };
+      for (const r of answers('rewardCount', ev)) if (Number.isFinite(r)) count = ev.count = Math.max(1, Math.min(Math.floor(r), 12));
+      st.count++; st.last.count = [n, count];
+      if (count !== n) return { value: count };
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------------------
+  // teamLuck: points added to the party's luck (the game's 0..14 scale, D..SSS) wherever the game uses it:
+  // rarity upgrades of reward options, the letter on the reward screen, the rarity of wild Pokémon.
+  // The game's function (getPartyLuckValue) cannot be reached; it adds up getLuck() of every party member that
+  // may battle and clamps the sum to 0..14. So for the length of one call one such member answers getLuck()
+  // with the bonus on top (an own property on that one object, deleted again in `finally`). Nothing is
+  // written to any Pokémon's luck field. A daily run takes its luck from the day's seed: left alone.
+  function luckBonus() {
+    if (!X.has('teamLuck') || isDaily()) return 0;
+    let n = 0;
+    for (const r of answers('teamLuck', { wave: B.wave() })) if (Number.isFinite(r)) n += r;
+    return Math.max(0, Math.min(Math.floor(n), 14));
+  }
+  let luckDepth = 0;
+  function withLuck(fn) {
+    let p = null, bonus = 0;
+    X.guard('b2 luck', () => {
+      if (luckDepth) return;
+      bonus = luckBonus();
+      if (!(bonus > 0)) return;
+      p = scene().getPlayerParty().find(q => q && typeof q.getLuck === 'function' && q.isAllowedInBattle() && !Object.prototype.hasOwnProperty.call(q, 'getLuck')) || null;
+    });
+    if (!p || !(bonus > 0)) return fn();
+    const own = p.getLuck; // the class's method
+    luckDepth++; st.luckCalls++; st.last.luck = bonus;
+    p.getLuck = function () { return own.apply(this, arguments) + bonus; };
+    try { return fn(); } finally { delete p.getLuck; luckDepth--; }
+  }
+  // the party's luck as the game adds it up (without what a timed event adds), and the same with the mods' points
+  const LUCK = ['D', 'C', 'C+', 'B-', 'B', 'B+', 'A-', 'A', 'A+', 'A++', 'S', 'S+', 'SS', 'SS+', 'SSS'];
+  function partyLuck() {
+    let n = 0;
+    for (const p of scene().getPlayerParty()) if (p && p.isAllowedInBattle()) n += p.getLuck();
+    return Math.max(0, Math.min(n, 14));
+  }
+  X.extendBattle({
+    // the team's luck right now, mods' points included: { value: 0..14, letter: 'D'..'SSS', bonus }
+    teamLuck: () => X.guard('b2 teamLuck', () => {
+      const bonus = luckBonus(), value = Math.min(14, partyLuck() + bonus);
+      return { value, letter: LUCK[value], bonus };
+    }, { value: 0, letter: 'D', bonus: 0 }),
+  });
+
+  // SelectModifierPhase.getModifierTypeOptions: wrapped once for the luck and for the mints (addMint, below).
+  // Our wrap sits outside host-team.js's (its lure swap rolls the game's list again, with our luck) and inside
+  // the core's (its offer of mod items sees our list).
+  X.phaseClass('SelectModifierPhase', proto => {
+    st.wraps.getModifierTypeOptions = X.wrap(proto, 'getModifierTypeOptions', 'b2', orig => function () {
+      const self = this, args = arguments;
+      return withLuck(() => {
+        const opts = orig.apply(self, args);
+        X.guard('b2 mint', () => addMint(self, opts, () => orig.apply(self, args)));
+        return opts;
+      });
+    });
+  });
+  let sceneDone = null, arenaDone = null;
+  function hookLuck(s) {
+    if (sceneDone !== s && typeof s.updateAndShowText === 'function') { // the letter on the reward screen
+      sceneDone = s;
+      st.wraps.updateAndShowText = X.wrap(s, 'updateAndShowText', 'b2', orig => function () { const self = this, args = arguments; return withLuck(() => orig.apply(self, args)); });
+    }
+    const proto = s.arena && X.protoWith(s.arena, 'randomSpecies');
+    if (proto && proto !== arenaDone) {
+      arenaDone = proto;
+      // randomSpecies(waveIndex, level, attempt = 0, luckValue = 0, isBoss): the callers hand the party's luck in.
+      // It calls itself again with attempt + 1 and the same luck when it rolls again: only the first call adds.
+      st.wraps.randomSpecies = X.before(proto, 'randomSpecies', 'b2', (self, args) => {
+        if (args.length < 4 || args[2]) return; // no luck passed (幻觉 picks a species this way), or a retry
+        const bonus = luckBonus();
+        if (!(bonus > 0)) return;
+        const next = args.slice();
+        next[3] = Math.min(14, (Number(args[3]) || 0) + bonus);
+        st.luckSpecies++; st.last.species = [args[3], next[3]];
+        return { args: next };
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // mintRate: how many times as often a mint (薄荷) comes up among the reward options.
+  // The game's pools and weights cannot be reached. Instead: when the screen the game rolled has no mint, the
+  // same screen is rolled once more out of sight (on a seed of its own; the game's random sequence is put back
+  // afterwards), and a mint found there is let through with chance (rate - 1). It takes the place of the
+  // cheapest option of the real screen that is not above a mint's rarity (高级). The hidden roll is the game's
+  // own roll, so it finds a mint exactly as often as the real one: a screen has a mint `rate` times as often
+  // (less the rare case that both rolls had one). Only the normal reward and its rerolls; never a set list or
+  // a copy of a screen. The game never puts two mints on one screen, and neither do we.
+  const isMint = o => !!(o && o.type && (o.type.id === 'MINT' || (o.type.constructor && o.type.constructor.name === 'PokemonNatureChangeModifierType')));
+  function mintRate(ph) {
+    if (dbg.mintRate != null) return dbg.mintRate;
+    let rate = 1;
+    for (const r of answers('mintRate', info(ph))) if (Number.isFinite(r) && r > 0) rate *= r;
+    return rate;
+  }
+  function addMint(ph, opts, rollAgain) {
+    if (ph.customModifierSettings || ph.isCopy || !Array.isArray(opts) || !opts.length) return;
+    if (dbg.mintRate == null && !X.has('mintRate')) return;
+    if (opts.some(isMint)) return;
+    const extra = Math.min(mintRate(ph) - 1, 50);
+    if (!(extra > 0)) return;
+    const s = scene(), wave = B.wave(), rc = ph.rerollCount || 0;
+    const lock = !!(s.lockModifierTiers && ph.modifierTiers && ph.modifierTiers.length);
+    const tierOf = o => (o && o.type ? o.type.tier || 0 : 99);
+    // the slot a mint may take: an option of 高级 or below (never a rarer one, never a mod item); with 锁定稀有度
+    // on only a 高级 one, because the rarities on screen are what the next reroll keeps and what it costs
+    let at = -1;
+    opts.forEach((o, i) => {
+      if (!o || !o.type || o.type.__coopMod) return;
+      const t = tierOf(o);
+      if ((lock ? t === 2 : t <= 2) && (at < 0 || t < tierOf(opts[at]))) at = i;
+    });
+    if (at < 0) return;
+    const k = Math.ceil(extra), chance = extra / k; // k hidden screens, each lets its mint through with extra / k
+    const roll = X.rng([s.seed, wave, rc, 'b2-mint'].join(':'));
+    let mint = null;
+    for (let j = 0; j < k && !mint; j++) {
+      const r = roll();
+      let found = null;
+      s.executeWithSeedOffset(() => { // an error inside would leave the game's random state changed: caught here
+        try { found = (rollAgain() || []).find(isMint) || null; } catch (e) { X.log('b2 mint: hidden roll failed: ' + String(e).slice(0, 200)); }
+      }, 7919 * (wave + 1) + 131 * rc + j);
+      st.shadows++;
+      if (!found) continue;
+      st.mintsFound++;
+      if (r < chance) mint = found;
+    }
+    if (!mint) return;
+    const was = opts[at];
+    opts[at] = mint;
+    st.mintsPut++; st.last.mint = { wave, rc, at, was: was.type && was.type.id, mint: mint.type.name };
+    X.log('b2 mint: ' + mint.type.name + ' takes slot ' + at + ' (wave ' + wave + ', reroll ' + rc + ')');
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // ballThrown: a Poké Ball was thrown (AttemptCapturePhase.start took it out of the pouch). A listener that
+  // returns true keeps the ball: it is put back inside the same call. A throw at a Pokémon that is already
+  // gone takes no ball and is not reported.
+  // Whose pouch: host-team.js gives each player their own balls and shows the game one pouch (a view that
+  // goes by the current phase). At this moment its idea of the thrower (CoopTeam.catcher(), filled by a
+  // 150 ms poll) is usually still empty or the thrower of an earlier turn, so the ball may have come out of
+  // the other player's pouch (seen on the rig: 2P throws, 1P's count drops). We do not judge that: the ball
+  // goes back into the very pouch it was taken from. For that write the phase manager answers
+  // "a CommandPhase of that player's Pokémon" to host-team.js's question (its rule: a Pokémon choosing its
+  // command is its owner's business); afterwards the pouches are compared with how they were before the throw.
+  const Team = () => window.CoopTeam || null;
+  const pouches = () => { const T = Team(); return T && typeof T.purse === 'function' ? T.purse().balls : null; };
+  function thrower() { // the player whose Pokémon has this turn's BALL command (the other slot carries a skipped copy)
+    const s = scene(), b = s.currentBattle, party = s.getPlayerParty(), T = Team();
+    if (!b || !b.turnCommands || !T) return null;
+    for (const slot of [0, 1]) { const c = b.turnCommands[slot]; if (c && c.command === 1 /* Command.BALL */ && !c.skip) return T.ownerOf(party[slot]) || null; }
+    return null;
+  }
+  function asPlayer(who, fn) { // run fn while host-team.js sees `who` as the one acting
+    const s = scene(), pm = s.phaseManager, T = Team();
+    const i = s.getPlayerParty().findIndex(p => T.ownerOf(p) === who);
+    if (i < 0) return false;
+    const own = Object.prototype.hasOwnProperty.call(pm, 'getCurrentPhase'), was = pm.getCurrentPhase;
+    pm.getCurrentPhase = () => ({ phaseName: 'CommandPhase', fieldIndex: i });
+    try { if (T.actor() !== who) return false; fn(); return true; } finally { if (own) pm.getCurrentPhase = was; else delete pm.getCurrentPhase; }
+  }
+  function putBack(t, before, p0) {
+    const s = scene(), p1 = pouches();
+    const n = (box, who) => (box && box[who] && Number(box[who][t])) || 0;
+    const lost = p0 && p1 ? ['p1', 'p2'].filter(w => n(p1, w) === n(p0, w) - 1) : [];
+    let how = 'view';
+    if (lost.length === 1 && n(p0, 'p1') + n(p0, 'p2') === n(p1, 'p1') + n(p1, 'p2') + 1 && asPlayer(lost[0], () => { s.pokeballCounts[t] = s.pokeballCounts[t] + 1; })) how = lost[0];
+    else s.pokeballCounts[t] = before; // no split pouches to look at: the game's own pouch, as it was
+    const p2 = pouches(), same = !p0 || !p2 || (n(p0, 'p1') === n(p2, 'p1') && n(p0, 'p2') === n(p2, 'p2'));
+    if (!same) X.log('b2 ball: the ball is back, but not in the pouch it came from: ' + JSON.stringify([p0, p1, p2].map(x => [n(x, 'p1'), n(x, 'p2')])));
+    return { how, same };
+  }
+  X.phaseClass('AttemptCapturePhase', proto => {
+    st.wraps.captureStart = X.wrap(proto, 'start', 'b2', orig => function () {
+      const self = this, s = scene(), t = self.pokeballType;
+      let before = null, p0 = null;
+      if (X.has('ballThrown')) X.guard('b2 ball (before)', () => { p0 = pouches(); before = s.pokeballCounts[t]; });
+      const r = orig.apply(self, arguments);
+      if (before != null) X.guard('b2 ball (after)', () => {
+        const after = s.pokeballCounts[t];
+        if (after !== before - 1) return; // no ball was taken (the target is gone), or somebody else changed the count
+        const owner = thrower();
+        st.throws++;
+        const keep = answers('ballThrown', { ball: t, owner, wave: B.wave() }).some(x => x === true);
+        st.last.ball = { ball: t, owner, catcher: (Team() && Team().catcher && Team().catcher()) || null, before, after, keep };
+        if (!keep) return;
+        const back = putBack(t, before, p0);
+        self.__b2Kept = true;
+        st.kept++; st.last.ball.back = back;
+        X.log('b2 ball: kept (kind ' + t + ', thrown by ' + owner + ', back to ' + back.how + ')');
+      });
+      return r;
+    });
+    // 捡球 (Ball Fetch) hands the last ball of a failed throw back at the end of the turn: not a second time
+    // when the ball was never used up
+    st.wraps.failCatch = X.after(proto, 'failCatch', 'b2', self => {
+      if (!self.__b2Kept) return;
+      const b = scene().currentBattle;
+      if (b && b.lastUsedPokeball === self.pokeballType) { b.lastUsedPokeball = null; st.last.fetchCleared = true; }
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------------------
+  // A mod switched on or off while a reward screen is open: the price under 刷新商店 and the luck letter were
+  // written when the screen opened, and would go on showing 免费×N (or the old ₽ price, or the old letter)
+  // although the next press costs something else. Ask the game again and write both anew. Done at the switch
+  // itself (switching the last mod off stops the ticks) and on the next ticks (switching the first mod on puts
+  // the hooks in at the next tick only). Nothing is rolled again: the options on screen stay as they are.
+  let stale = 0;
+  function refreshShown(s) {
+    const pm = s && s.phaseManager, ph = pm && pm.getCurrentPhase(), h = s && s.ui && typeof s.ui.getHandler === 'function' ? s.ui.getHandler() : null;
+    if (!ph || ph.phaseName !== 'SelectModifierPhase' || !Array.isArray(ph.typeOptions)) return false;
+    if (!h || !h.constructor || h.constructor.name !== 'ModifierSelectUiHandler' || !h.active) return false; // a party menu or a question is on top: the game writes the price again when it comes back
+    if (typeof h.setRerollCost !== 'function' || typeof h.updateRerollCostText !== 'function') return false;
+    h.setRerollCost(ph.getRerollCost(s.lockModifierTiers));
+    h.updateRerollCostText();
+    if (s.luckText && s.luckText.visible && typeof s.updateAndShowText === 'function') s.updateAndShowText(0);
+    st.refreshed = (st.refreshed || 0) + 1;
+    return true;
+  }
+  X.onSwitch(() => { stale = 3; X.guard('b2 refresh (switch)', () => refreshShown(scene())); });
+
+  X.onTick(s => { hookLabel(s); hookLuck(s); if (stale > 0) { stale--; X.guard('b2 refresh (tick)', () => refreshShown(s)); } });
+
+  // ---- tests (rigs/b2): CoopMods.debug.b2(), .b2Set({ mintRate }) ----
+  X.debug('b2', () => JSON.parse(JSON.stringify({ ...st, freeUsed: chain.free, chain, dbg, luck: X.guard('b2 dbg', () => B.teamLuck(), null) })));
+  X.debug('b2Set', o => { Object.assign(dbg, o || {}); return { ...dbg }; });
+  X.debug('b2IsMint', isMint);
+});
+
+// ======== engine extension: c (engine/ext-c.js) ========
+// Engine extension of team c (气势纽带 #4, 讲究望远镜 #5, 共生孢子 #6, 粉色香草 #7, 褪色魂心 #9, 队友保险 #10,
+// 楔石 #12, 双人自行车 #28, 战斗节拍器 #29). Most of what these items need is in the core already (damageCalc,
+// beforeDamage, moveSelect, statChange, moveUsed, the 集火 verdict). This file adds the three things it lacks
+// (run on rig c: evidence/c.md):
+//
+//   event  fatalHit   a move hit has just taken a player's Pokémon to 0 HP and nothing of the game's own
+//                     (忍耐, 结实, 气势头带) kept it standing. A listener that returns true keeps it at 1 HP.
+//   event  fainted    a Pokémon has really fainted (after 复活种子 had its chance; the core's `faint` fires before)
+//   B.knowsMove(p, moveId)   is the move in the Pokémon's moveset right now
+//
+// For mod authors (简体中文, to go into docs/MOD-API.md):
+//
+//   事件 `fatalHit`：我方一只宝可梦被招式打到 HP 归零的那一下（忍耐、结实、气势头带这些游戏自带的保命效果都没救下它之后）。
+//     收到 `target`（被打的）`attacker`（出招的）`damage`（这一下本来要扣的量）`hp`（挨打前的 HP）
+//     `rest`（留 1 点 HP 之后多出来的伤害 = damage − (hp − 1)）`then(fn)`（这一击对每个目标都结算完之后再做的事；
+//     想再扣谁的血、发消息都放在这里面，不要在处理函数里直接做）。
+//     返回 `true` = 让它留下 1 点 HP、不倒下；第一个返回 `true` 的处理函数说了算，后面的不再问。
+//     只有招式直接打的才会来：中毒、天气、反伤、mod 自己用 `B.damage` 扣的血都不算。
+//   事件 `fainted`：一只宝可梦真的倒下了（带着复活种子被救起来的不算；`faint` 事件在那之前就会来）。收到 `pokemon`。
+//   `B.knowsMove(p, moveId)`：这只宝可梦现在会不会这个招式。
+CoopModsExt('c', X => {
+  const seen = { fatal: 0, kept: 0, fainted: 0, faintedLate: 0, lateThen: 0 }; // counters for the rig (CoopMods.debug.c())
+  X.addEvent('fatalHit');
+  X.addEvent('fainted');
+
+  // ---- B.knowsMove ----
+  X.extendBattle({
+    knowsMove: (p, moveId) => X.guard('c knowsMove', () => p.getMoveset().some(m => m && m.moveId === moveId), false),
+  });
+
+  // ---- fainted ----
+  // FaintPhase.doFaint is where the game itself reacts to a faint (魂心, 自信过度): it runs once per real faint,
+  // not when 复活种子 revives and not when the phase finds the Pokémon standing again.
+  // The event is sent from inside doFaint, at its pokemon.resetTera() call: after the game has queued
+  // "X 倒下了！" and before it queues what follows a faint. That is where the game's own 魂心 raises its stat,
+  // and it matters: when the last teammate standing is moved to the middle (ToggleDoublePositionPhase, queued
+  // at the end of doFaint) its battler index changes, and a stat phase queued after that would find nobody.
+  // Should resetTera ever not be called there, the event is sent when doFaint returns.
+  let faintCtx = null; // the doFaint that is running: { pokemon, told }
+  const tellFainted = () => {
+    const c = faintCtx;
+    if (!c || c.told) return;
+    c.told = true;
+    if (!X.has('fainted')) return;
+    seen.fainted++;
+    X.emit('fainted', { pokemon: c.pokemon });
+  };
+  X.phaseClass('FaintPhase', proto => {
+    X.wrap(proto, 'doFaint', 'c', orig => function () {
+      const outer = faintCtx;
+      faintCtx = X.guard('c doFaint', () => { const p = this.getPokemon(); return p ? { pokemon: p, told: false } : null; }, null);
+      try { return orig.apply(this, arguments); } finally {
+        if (faintCtx && !faintCtx.told) { seen.faintedLate++; X.guard('c fainted (late)', tellFainted); }
+        faintCtx = outer;
+      }
+    });
+  });
+  X.pokemonClass(proto => {
+    X.before(proto, 'resetTera', 'c', self => { if (faintCtx && faintCtx.pokemon === self) tellFainted(); });
+  });
+
+  // ---- fatalHit ----
+  // A move hit is Pokemon.damageAndUpdate(dmg, { source: attacker, ignoreFaintPhase: true }) -> Pokemon.damage(),
+  // which lets 忍耐 / 结实 / 气势头带 answer first and then takes the HP. With ignoreFaintPhase nothing else has
+  // happened at that point (the FaintPhase is queued later by the move, only if the target is still at 0 HP),
+  // so putting the HP back to 1 there is all it takes to keep the Pokémon standing.
+  // What a listener hands to ev.then() runs when the strike is over for ALL its targets (MoveEffectPhase.end),
+  // not right after this target's hit. Reason (seen on rig c, evidence/c.md "Check"): 气势纽带 hands the rest of
+  // the hit to the holder there; done in the middle of an enemy's spread move it knocked the holder out while
+  // the holder was still a target to come, the game then queued its own FaintPhase for that target as well,
+  // and the holder fainted twice ("倒下了" twice, every faint reaction twice, two switch prompts).
+  let hit = null; // the move hit being carried out on a player's Pokémon right now: { target, source, done, after }
+  let pending = [], strikeEnd = false; // then-callbacks waiting for the end of the strike / is MoveEffectPhase.end hooked
+  const flush = () => { const list = pending; pending = []; for (const run of list) run(); };
+  X.phaseClass('MoveEffectPhase', proto => { strikeEnd = X.before(proto, 'end', 'c', () => { if (pending.length) flush(); }) === true; });
+  X.onTick(() => { if (pending.length && X.phaseNow() !== 'MoveEffectPhase') { seen.lateThen++; flush(); } }); // should the phase ever end another way
+  X.onSwitch(() => { pending = []; }); // (a mod switched off or on: nothing is carried over)
+  X.pokemonClass(proto => {
+    X.wrap(proto, 'damageAndUpdate', 'c', orig => function (dmg, opts) {
+      const mine = X.guard('c hit start', () => !!(opts && opts.source && dmg > 0 && this.isPlayer() && !this.switchOutStatus && X.has('fatalHit')), false);
+      if (!mine) return orig.apply(this, arguments);
+      const outer = hit, ctx = hit = { target: this, source: opts.source, done: false, after: null };
+      let r;
+      try { r = orig.apply(this, arguments); } finally { hit = outer; }
+      if (ctx.after) {
+        const fns = ctx.after, run = () => { for (const fn of fns) X.guard('c after fatalHit', () => fn(r)); };
+        if (strikeEnd && X.phaseNow() === 'MoveEffectPhase') pending.push(run); else run(); // (not inside a strike: a direct call)
+      }
+      return r;
+    });
+    // (EnemyPokemon overrides damage and calls this one through super: the context is only ever a player's Pokémon)
+    X.wrap(proto, 'damage', 'c', orig => function (dmg, ignoreSegments, preventEndure, ignoreFaintPhase) {
+      const ctx = hit;
+      if (!ctx || ctx.target !== this || ctx.done) return orig.apply(this, arguments);
+      const hp0 = this.hp;
+      const r = orig.apply(this, arguments);
+      return X.guard('c fatalHit', () => {
+        if (!(hp0 > 0 && this.hp <= 0 && ignoreFaintPhase === true && !preventEndure && r > 0)) return r;
+        ctx.done = true;
+        seen.fatal++;
+        const ev = { target: this, attacker: ctx.source, damage: dmg, hp: hp0, rest: Math.max(1, Math.floor(dmg) - (hp0 - 1)), then: fn => { if (typeof fn === 'function') (ctx.after = ctx.after || []).push(fn); } };
+        let keep = false;
+        for (const [m, fn] of X.listeners('fatalHit')) {
+          if (X.guard('mod ' + m.id + ' fatalHit', () => fn(ev) === true, false)) { keep = true; break; }
+        }
+        if (!keep) return r;
+        seen.kept++;
+        this.hp = 1;
+        return r - 1;
+      }, r);
+    });
+  });
+
+  X.debug('c', () => ({ ...seen }));
+});
+
+// ======== engine extension: d (engine/ext-d.js) ========
+// Engine extension d: HP going up and down, for 生命红绳 #15, 友谊宝珠 #16, 回复口袋 #14, 吃不完的拉面 #22.
+// What it gives the mods (described for mod authors at the end of this comment, 简体中文):
+//   events   healDone      a heal phase is finished (HP moved, its message queued): the place to answer a heal
+//            hpLost        a Pokémon really lost HP (move hits, weather, recoil, poison, burn, Pain Split ...)
+//            medicineUsed  an HP medicine was used from the reward screen or the shop
+//   battle   B.canHeal(p)             can an in-battle heal restore anything for p right now
+//            B.healExact(p, n, opts)  like B.heal, but exactly n HP (回复护符 does not multiply it)
+//            B.restoreHp(p, n)        HP for a Pokémon outside battle (the bench), no animation
+// Hooks (all wrap and pass through; with no mod on the game's own methods are called directly):
+//   PokemonHealPhase.doHealPokemon / heal / getHealAmount   (tag 'd')
+//   Pokemon.damage / Pokemon.damageAndUpdate                (tag 'd')
+//   BattleScene.addModifier                                 (tag 'd')
+// Nothing here knows an item: the items are in mod/items/d.js.
+//
+// ---- 给 mod 作者（接口版本 2 的补充，team d）----
+// 事件
+//   healDone      一次战斗中的回复做完之后（HP 已经加上，它自己的提示也排好了）。和 `heal` 的区别：`heal` 在
+//                 HP 刚加上的那一瞬间来，这时再排一次回复会抢在原来那句提示前面；想「跟着回复再做点什么」用这个。
+//                 只管游戏的回复阶段（招式、特性、树果、吃剩的东西、贝壳之铃、B.heal、B.healExact），
+//                 分担痛楚、再生力这类直接改 HP 的不算。
+//                 收到：pokemon、amount（实际回复的量，一定大于 0）、tag（B.heal / B.healExact 写的 tag，否则 null）、
+//                 revive（是复活种子那样的复活）。
+//   hpLost        一只宝可梦的 HP 真的减少之后（招式、天气、反伤、中毒、灼伤、分担痛楚都算）。
+//                 收到：pokemon、amount（实际减少的量）、fainted（这一下倒下了）。
+//   medicineUsed  在战斗外（奖励界面、商店）用了一件回复 HP 的药（伤药、好伤药、厉害伤药、全满药、全复药、
+//                 活力碎片、活力块、圣灰）并且真的生效之后。
+//                 收到：targets（药用在了哪些宝可梦身上；圣灰是被它救起来的那些）、revive（是复活类的药）、
+//                 item（药的名字）、effectOn(p)（这件药用在 p 身上按游戏的算法能回复多少 HP，不看 p 现在缺多少）、
+//                 screen（第几个奖励界面；在同一个界面上连用几件药，这个数不变）。
+// 战场 api.battle
+//   canHeal(p)             p 在场上、没倒下、HP 没满、没被「回复封锁」：现在给它回复有用吗
+//   healExact(p, n, opts)  和 heal 一样排一次回复，但正好回复 n 点（回复护符不加成）。opts 同 heal：message、tag、quiet。
+//                          回复不了（见 canHeal）或 n 不大于 0 时返回 false
+//   restoreHp(p, n)        给不在战斗中的宝可梦（比如没上场的）直接加 HP，没有动画；倒下的不加。返回实际加了多少
+CoopModsExt('d', X => {
+  const B = X.battle;
+  X.addEvent('healDone');
+  X.addEvent('hpLost');
+  X.addEvent('medicineUsed');
+
+  const standing = p => !!(p && B.onField(p));
+  const healBlocked = p => X.guard('d heal block', () => !!(p.getTag && p.getTag('HEAL_BLOCK')), false);
+  // the team's 回复护符 multiplier (1 when there are none), read the way the game does
+  const charm = () => X.guard('d charm', () => {
+    const h = { value: 1 };
+    (X.scene().modifiers || []).filter(m => m && m.constructor && m.constructor.name === 'HealingBoosterModifier').forEach(m => m.apply(h));
+    return h.value > 0 && isFinite(h.value) ? h.value : 1;
+  }, 1);
+
+  X.extendBattle({
+    canHeal: p => X.guard('d canHeal', () => standing(p) && !p.isFullHp() && !healBlocked(p), false),
+    healExact(p, amount, opts) {
+      return X.guard('d healExact', () => {
+        const o = opts || {};
+        amount = Math.floor(Number(amount) || 0);
+        if (!(amount > 0) || !B.canHeal(p)) return false;
+        const pm = X.scene().phaseManager;
+        const ph = pm.create('PokemonHealPhase', p.getBattlerIndex(), amount, { message: o.message ? String(o.message) : undefined, showFullHpMessage: false, skipAnim: !!o.quiet });
+        ph.__coopModHeal = { tag: o.tag == null ? null : String(o.tag) }; // the core's `heal` event reads the tag from here
+        ph.__dExact = true;
+        pm.unshiftPhase(ph);
+        return true;
+      }, false);
+    },
+    restoreHp(p, amount) {
+      return X.guard('d restoreHp', () => {
+        amount = Math.floor(Number(amount) || 0);
+        if (!p || !(amount > 0) || p.isFainted()) return 0;
+        const before = p.hp;
+        p.hp = Math.min(p.hp + amount, p.getMaxHp());
+        if (p.hp !== before && p.updateInfo) Promise.resolve(p.updateInfo(true)).catch(() => {});
+        return p.hp - before;
+      }, 0);
+    },
+  });
+
+  // ---- heals: PokemonHealPhase is the one door for healing in battle ----
+  X.phaseClass('PokemonHealPhase', proto => {
+    // the HP really gained (the phase's own number is capped at max HP, not at what was missing)
+    X.wrap(proto, 'doHealPokemon', 'd', orig => function () {
+      let p = null, before = 0;
+      X.guard('d heal measure', () => { p = this.getPokemon(); before = p ? p.hp : 0; });
+      const r = orig.apply(this, arguments);
+      X.guard('d heal measure', () => { this.__dGain = p ? p.hp - before : 0; this.__dMon = p; });
+      return r;
+    });
+    // an exact heal (B.healExact): the number as asked, without 回复护符
+    X.after(proto, 'getHealAmount', 'd', self => {
+      if (!self.__dExact || self.revive) return;
+      return { value: Math.min(Math.max(0, Math.floor(self.hpHealed)), self.getPokemon().getMaxHp()) };
+    });
+    // when heal() is through, the HP has moved and the phase's own message is queued: tell the mods
+    X.wrap(proto, 'heal', 'd', orig => function () {
+      const r = orig.apply(this, arguments);
+      const done = () => X.guard('d healDone', () => {
+        const gain = this.__dGain, p = this.__dMon;
+        this.__dGain = 0;
+        if (!(gain > 0) || !p || !X.has('healDone')) return;
+        X.emit('healDone', { pokemon: p, amount: gain, tag: this.__coopModHeal ? this.__coopModHeal.tag : null, revive: !!this.revive });
+      });
+      if (r && typeof r.then === 'function') return r.then(v => { done(); return v; });
+      done();
+      return r;
+    });
+  });
+
+  // ---- losses: every HP loss goes through Pokemon.damage; most come by way of damageAndUpdate ----
+  // hpLost is told when the game's own call is through: after damageAndUpdate has returned for losses that
+  // came through it, right away for the ones that call damage directly (poison, burn, Pain Split).
+  let depth = 0, pending = [];
+  const tell = list => { for (const ev of list) X.guard('d hpLost', () => { if (X.has('hpLost')) X.emit('hpLost', ev); }); };
+  X.pokemonClass(proto => {
+    X.after(proto, 'damage', 'd', (self, args, lost) => {
+      if (!(lost > 0) || !X.has('hpLost')) return;
+      const ev = { pokemon: self, amount: lost, fainted: self.isFainted() };
+      if (depth > 0) pending.push(ev); else tell([ev]);
+    });
+    X.wrap(proto, 'damageAndUpdate', 'd', orig => function () {
+      depth++;
+      try { return orig.apply(this, arguments); } finally {
+        depth--;
+        if (depth <= 0) { depth = 0; if (pending.length) { const list = pending; pending = []; tell(list); } }
+      }
+    });
+  });
+
+  // ---- medicine: every use of an item goes through scene.addModifier ----
+  const isHpMedicine = m => !!m && typeof m === 'object' && ((m.constructor && m.constructor.name === 'PokemonHpRestoreModifier')
+    || ('restorePercent' in m && 'restorePoints' in m && 'fainted' in m && 'pokemonId' in m));
+  let wrapped = null;
+  const screen = { phase: null, n: 0 };
+  X.onTick(s => {
+    if (wrapped === s) return;
+    const proto = X.protoWith(s, 'addModifier');
+    if (!proto) return;
+    X.wrap(proto, 'addModifier', 'd', orig => function (modifier) {
+      let was = null;
+      X.guard('d medicine', () => {
+        if (!X.has('medicineUsed') || !isHpMedicine(modifier)) return;
+        was = this.getPlayerParty().map(p => ({ p, hp: p.hp }));
+      });
+      const r = orig.apply(this, arguments); // true: the item did something to somebody (the shop takes the money on it)
+      if (was && r) X.guard('d medicine', () => {
+        const m = modifier, revive = !!m.fainted;
+        // the Pokémon the game applied it to: the one it was used on (圣灰: everybody), alive for a potion, fainted for a revive
+        const targets = was.filter(w => (m.pokemonId === -1 || w.p.id === m.pokemonId) && (w.hp <= 0) === revive).map(w => w.p);
+        if (!targets.length) return;
+        const mult = revive ? 1 : charm(), pts = Number(m.restorePoints) || 0, pct = Number(m.restorePercent) || 0;
+        // the game's own formula (PokemonHpRestoreModifier.apply), for any Pokémon
+        const effectOn = q => X.guard('d effectOn', () => Math.max(Math.ceil(Math.max(Math.floor(pct * 0.01 * q.getMaxHp()), revive ? pts : Math.floor(pts * mult))), 1), 0);
+        // which reward screen this is (several medicines can be bought on one screen: the number stays the same)
+        const ph = X.guard('d screen', () => this.phaseManager.getCurrentPhase(), null);
+        if (ph !== screen.phase) { screen.phase = ph; screen.n++; }
+        X.emit('medicineUsed', { targets, revive, item: (m.type && m.type.name) || '', effectOn, screen: screen.n });
+      });
+      return r;
+    });
+    wrapped = s;
+  });
+
+  // ---- for the rig ----
+  X.debug('dCharm', () => charm());
+  X.debug('dState', () => ({ depth, pending: pending.length, addModifier: !!wrapped }));
+});
+
+// ======== engine extension: e (engine/ext-e.js) ========
+// Engine extension of team e: berries. For 文柚大果 #11, 哆啦A梦树果袋 #27, 异次元树果袋 #20,
+// 超级巨化卡比兽玩偶 #21, 树果种植盆 #30 (mod/items/e.js). What it gives a mod (written up for mod authors, in
+// 简体中文, at the end of notes/requests-e.md, ready for docs/MOD-API.md):
+//   events    berryTime { pokemon }                          the game's berry moment, once per player Pokémon on the field
+//             berryEaten { pokemon, berry, name, item, kept } a Pokémon really ate a berry (the game's, or a mod item used as one)
+//                        (for a mod item eaten inside berryTime it is sent once that Pokémon's berryTime handlers are
+//                        through, so the eater's own message and heals are queued before what a listener adds)
+//   B.        hpRatio(p) berryName(t) berries(p) berryRoom(p) giveBerry(p, t) eatAsBerry(p, item) trimBerries(p)
+//   api.      berryCap(item, n)                              each copy of that held item: +n to the holder's berry stacks
+//             countsAsBerry(item)                            that held mod item's own max follows the same bonus (core: X.onMax)
+// Hooks (all pass through; tags start with 'e'):
+//   BerryPhase.eatBerries            after the game's own berries: berryEaten for what the game ate, then berryTime
+//   Pokemon.recordEatenBerry         the one place every real eat goes through (BerryPhase, 大快朵颐, 茶会, 虫咬, 啄食)
+//   BerryModifier.getMaxHeldItemCount  + the bonus declared with api.berryCap
+//   BattleScene.tryTransferHeldItemModifier  a berry stack moved onto a Pokémon without that berry: not more than its own limit
+//   gameData.parseSessionData        only reads the mod block of a save that is being loaded (see capBonus)
+//   gameData.getSessionSaveData      only notes, in the cap item's state, which stacks are above the game's own limit
+// With the mod off, or with none of these items held, every hook returns what the game returned.
+CoopModsExt('e', X => {
+  const B = X.battle;
+  const scene = () => X.scene();
+  const TYPES = 11; // BerryType 0..10: SITRUS LUM ENIGMA LIECHI GANLON PETAYA APICOT SALAC LANSAT STARF LEPPA
+  const ZH = ['文柚果', '木子果', '谜芝果', '枝荔果', '龙睛果', '龙火果', '杏仔果', '沙鳞果', '兰萨果', '星桃果', '苹野果']; // only when the game gives no name
+  const validType = t => Number.isInteger(t) && t >= 0 && t < TYPES;
+
+  X.addEvent('berryTime');
+  X.addEvent('berryEaten');
+
+  // ---- the game's berry classes (not reachable by name: taken from a berry that exists, or made by the save reader) ----
+  let TypeCtor = null; // BerryModifierType
+  const isBerry = m => !!m && typeof m.is === 'function' && m.is('BerryModifier');
+  function typeObj(t) {
+    if (TypeCtor) return new TypeCtor(t);
+    const s = scene();
+    const any = (s.modifiers || []).concat(s.enemyModifiers || []).find(isBerry);
+    let type = any && any.type ? new any.type.constructor(t) : null;
+    if (!type) {
+      // the save reader builds a BerryModifierType from its id ('BERRY') and the berry type; Cap stands in for the modifier class
+      const raw = JSON.stringify({ modifiers: [{ typeId: 'BERRY', typePregenArgs: [t], args: [], stackCount: 1, className: 'BerryModifier' }] });
+      const md = s.gameData.parseSessionData(raw).modifiers[0];
+      const Cap = function (ty) { this.type = ty; this.stackCount = 1; };
+      Cap.prototype.getMaxStackCount = () => 1;
+      const got = md.toModifier(Cap);
+      type = got && got.type;
+    }
+    if (!type || type.id !== 'BERRY') throw new Error('no BerryModifierType in this build');
+    TypeCtor = type.constructor;
+    return type;
+  }
+  const stackOf = (p, t) => scene().findModifier(m => isBerry(m) && m.berryType === t && m.pokemonId === p.id, p.isPlayer());
+  // the limit of berry t for p (the game's 2 or 3, plus what the cap hook adds)
+  const capOf = (p, t) => (stackOf(p, t) || typeObj(t).newModifier(p)).getMaxStackCount();
+  const berryName = t => (validType(t) ? X.guard('e berryName', () => typeObj(t).name, ZH[t]) || ZH[t] : '树果');
+  function berries(p) {
+    const out = [];
+    for (let t = 0; t < TYPES; t++) { const m = stackOf(p, t); out.push({ berry: t, name: berryName(t), count: m ? m.getStackCount() : 0, max: capOf(p, t) }); }
+    return out;
+  }
+  // one more berry t for p, the way 收获 gives one back. false: at its limit (never the game's "stack full, take
+  // a Poké Ball instead": the limit is checked here first), fainted, an enemy, or not a berry type.
+  function giveBerry(p, t) {
+    if (!p || !validType(t) || !p.isPlayer() || p.isFainted()) return false;
+    const s = scene(), have = stackOf(p, t);
+    if (have) {
+      if (have.getStackCount() >= have.getMaxStackCount()) return false;
+      have.stackCount++;
+    } else {
+      const mod = typeObj(t).newModifier(p);
+      if (mod.getMaxStackCount() < 1) return false;
+      s.addModifier(mod, true); // (its return value says nothing for a held item)
+      if (!stackOf(p, t)) return false;
+    }
+    s.updateModifiers(true); // the item bar, the counts
+    return true;
+  }
+
+  // ---- the berry limit: + what mods declared with api.berryCap(item, n) ----
+  const caps = []; // { key, n }
+  // A save that is being loaded: the game cuts every stack down to its limit while it rebuilds the items, and
+  // that is before the engine has read who holds what in that save (it does so at its next tick). So the mod
+  // block of the save just parsed is remembered here until the engine has caught up.
+  // By run seed, because the title's slot list parses several saves before one of them is loaded.
+  const pending = {}; // seed -> { pokemonId: { key: n } }
+  function blockCounts(block) {
+    const out = {};
+    if (!block || typeof block !== 'object' || !block.held || typeof block.held !== 'object') return out;
+    for (const id of Object.keys(block.held)) {
+      const h = block.held[id];
+      if (!h || typeof h !== 'object') continue;
+      for (const k of Object.keys(h)) { const e = h[k]; const n = block.v === 1 ? (e ? 1 : 0) : e && e.n >= 1 ? Math.floor(e.n) : 0; if (n) (out[id] = out[id] || {})[k] = n; }
+    }
+    return out;
+  }
+  function notePending(r) {
+    if (!r || !r.seed || !caps.length) return;
+    let block = r.coopMods;
+    if (!block) { try { const dev = JSON.parse(localStorage.getItem('coop-mods-held-v1') || '{}')[r.seed]; block = dev && dev.block; } catch {} } // the device copy the engine falls back on
+    const seeds = Object.keys(pending);
+    if (seeds.length > 12) delete pending[seeds[0]];
+    pending[r.seed] = blockCounts(block);
+  }
+  function capBonus(p) {
+    if (!p || typeof p.isPlayer !== 'function' || !p.isPlayer()) return 0;
+    let sum = 0;
+    for (const c of caps) {
+      if (!X.itemOn(c.key)) continue;
+      let n = X.count(p, c.key);
+      const run = pending[scene().seed], h = run && run[p.id];
+      if (h && h[c.key] > n) n = Math.min(h[c.key], X.items[c.key].max);
+      sum += n * c.n;
+    }
+    return sum;
+  }
+  let capHooked = false;
+  function hookCap(s) {
+    if (capHooked || !caps.length) return;
+    const proto = Object.getPrototypeOf(typeObj(0).newModifier({ id: 0 })); // a throw-away berry: never added to the game
+    if (!proto || !Object.prototype.hasOwnProperty.call(proto, 'getMaxHeldItemCount')) throw new Error('BerryModifier.getMaxHeldItemCount not found');
+    // (pokemon?) -> 2 or 3. The game calls it for the holder, for every party member (the red count) and with nothing.
+    capHooked = X.wrap(proto, 'getMaxHeldItemCount', 'e', orig => {
+      gameCap = orig; // what was there before this wrap: the game's 2 or 3 (plus whatever another extension added before)
+      return function (pokemon) {
+        const base = orig.apply(this, arguments);
+        if (typeof base !== 'number') return base;
+        return base + X.guard('e berry cap', () => capBonus(pokemon || (this.getPokemon && this.getPokemon())), 0);
+      };
+    });
+    // moving a berry stack onto a Pokémon that has none of that berry: the game takes the whole quantity without
+    // looking at the target's limit, which only shows once limits differ between Pokémon
+    const sp = X.protoWith(s, 'tryTransferHeldItemModifier');
+    if (sp) X.before(sp, 'tryTransferHeldItemModifier', 'e', (self, args) => {
+      const item = args[0], target = args[1];
+      if (!caps.length || !isBerry(item) || !target || !target.isPlayer() || typeof item.getMaxHeldItemCount !== 'function') return;
+      if (self.findModifier(m => isBerry(m) && m.berryType === item.berryType && m.pokemonId === target.id, true)) return; // the game checks this case itself
+      const max = item.getMaxHeldItemCount(target), want = args[3] == null ? 1 : args[3];
+      if (!(want > max)) return;
+      const a = args.slice(); while (a.length < 4) a.push(undefined);
+      a[3] = Math.max(1, max);
+      return { args: a };
+    });
+    const gd = s.gameData;
+    if (gd && typeof gd.parseSessionData === 'function') X.after(gd, 'parseSessionData', 'e', (self, args, r) => { notePending(r); });
+    if (gd && typeof gd.getSessionSaveData === 'function') X.before(gd, 'getSessionSaveData', 'e', () => { noteOver(); });
+    X.log('hooks (e): berry limit');
+    // the run was loaded before this hook existed (the room was opened, or the mod switched on, afterwards)
+    X.guard('e cap late start', () => { if ((s.getPlayerParty() || []).length) { restoreOver(s); s.updateModifiers(true); } });
+  }
+  // A run loaded while this hook was not there yet had its larger stacks cut by the game. Every save notes them
+  // in the cap item's state ({ over: { berryType: count } }), and they are put back when the hook goes in late
+  // (and when the mod comes back on): only a stack that sits exactly at the game's own limit (what a cut
+  // leaves) is raised again, and never above today's limit.
+  let gameCap = null;
+  const ownStacks = (s, p) => s.findModifiers(m => isBerry(m) && m.pokemonId === p.id, true);
+  function noteOver() {
+    const s = scene();
+    if (!capHooked || !gameCap || !s || !s.findModifiers) return;
+    for (const c of caps) for (const p of s.getPlayerParty() || []) {
+      const st = X.state(p, c.key), over = {}; // (the state is there while the mod is off too)
+      if (!st) continue;
+      for (const m of ownStacks(s, p)) if (m.stackCount > gameCap.call(m, p)) over[m.berryType] = m.stackCount;
+      if (Object.keys(over).length) st.over = over; else delete st.over;
+    }
+  }
+  function restoreOver(s) {
+    if (!gameCap) return;
+    let n = 0;
+    for (const c of caps) for (const p of X.holders(c.key)) { // (only while the item's mod is on)
+      const st = X.state(p, c.key), over = st && st.over;
+      if (!over || typeof over !== 'object') continue;
+      for (const m of ownStacks(s, p)) {
+        const want = Math.floor(Number(over[m.berryType]) || 0);
+        if (want > m.stackCount && m.stackCount === gameCap.call(m, p)) { const to = Math.min(want, m.getMaxStackCount()); n += to - m.stackCount; m.stackCount = to; }
+      }
+    }
+    if (n) X.log('berries above the game\'s limit put back: ' + n);
+  }
+  X.onTick(s => {
+    if (!capHooked && caps.length && s.gameData && s.modifiers) hookCap(s);
+    // the engine reads a run's items in this same tick, before the extensions: from here on X.count is right
+    if (s.seed && pending[s.seed] && (s.getPlayerParty() || []).length) delete pending[s.seed];
+  });
+  // held mod items that count as berries (文柚大果, 哆啦A梦树果袋): their max per Pokémon is the item's own plus the
+  // same bonus the game's berries get from the cap items. The core asks through X.onMax wherever it compares a
+  // count with the max (give, canTake, the reward pick and its 已经带满了 text).
+  const likes = new Set(); // item keys
+  X.onMax((p, key, max) => (likes.has(key) ? max + capBonus(p) : max));
+  // copies of those items above the Pokémon's limit of the moment (a cap item was taken away): they go, like berries
+  function trimLikes(p) {
+    let cut = 0;
+    for (const key of likes) {
+      if (!X.itemOn(key)) continue;
+      const over = X.count(p, key) - X.maxOf(p, key);
+      if (over > 0 && X.take(p, key, over)) cut += over;
+    }
+    return cut;
+  }
+  X.extendApi(mod => ({
+    // this held item of yours counts as a berry for the cap items: its max per Pokémon goes up with them
+    countsAsBerry(item) {
+      const key = item && item.key, it = key && X.items[key];
+      if (!it || it.mod !== mod.id || it.kind !== 'held') throw new Error('countsAsBerry: pass one of your own held items');
+      likes.add(key);
+    },
+    // each copy of this held item raises every berry stack limit of its holder by n
+    berryCap(item, n) {
+      const key = item && item.key;
+      n = Math.floor(Number(n == null ? 1 : n) || 0);
+      if (!key || String(key).indexOf(mod.id + ':') !== 0) throw new Error('berryCap: pass one of your own items');
+      if (!(n > 0)) throw new Error('berryCap: n must be a whole number above 0');
+      if (!caps.some(c => c.key === key)) caps.push({ key, n });
+    },
+  }));
+  // A stack above its limit is a state the game cannot handle: its "can this Pokémon take one more" check only
+  // refuses a stack that is exactly at the limit, and one more berry picked for that Pokémon then turns into
+  // the game's "stack full" replacement (5 Poké Balls). So when a limit drops (the item is gone, the mod is
+  // switched off) the berries above it go too: the same cut the game makes itself when it loads a save.
+  function trimBerries(p) {
+    const s = scene();
+    if (!s || !s.findModifiers || !(s.getPlayerParty() || []).length) return 0;
+    let cut = 0;
+    for (const m of s.findModifiers(x => isBerry(x) && (!p || x.pokemonId === p.id), true)) {
+      const max = m.getMaxStackCount();
+      if (max >= 1 && m.stackCount > max) { cut += m.stackCount - max; m.stackCount = max; }
+    }
+    s.updateModifiers(true); // counts and tint follow at once
+    if (cut) X.log('berries above the limit taken away: ' + cut);
+    return cut;
+  }
+  // The mod that owns a cap item is switched off: note the larger stacks, then cut them. Switched on again: put
+  // back what that cut took (and what the game cut if a run was loaded while it was off).
+  let wasOff = false;
+  X.onSwitch((id, on) => {
+    if (!capHooked || !window.CoopTeam || !caps.some(c => X.items[c.key] && X.items[c.key].mod === id)) return;
+    X.guard('e switch', () => {
+      const s = scene();
+      if (!on) { wasOff = true; noteOver(); trimBerries(null); }
+      else if (wasOff) { wasOff = false; if (s && (s.getPlayerParty() || []).length) { restoreOver(s); s.updateModifiers(true); } }
+    });
+  });
+
+  // ---- eating ----
+  // ctx: set while BerryPhase.eatBerries runs for one Pokémon and during the berryTime that follows
+  let ctx = null;
+  function ate(p, berry, item, kept) {
+    if (!X.has('berryEaten')) return;
+    const ev = { pokemon: p, berry, name: item ? (X.items[item] || {}).name || '' : berryName(berry), item: item || null, kept };
+    // inside the game's loop over the items: tell the mods when it is done. Inside this Pokémon's berryTime: tell
+    // them when its handlers are through, so what the eater's own item queued (its message, its heals) comes
+    // before what a listener queues (the doll's "变出了一个…").
+    if (ctx && (ctx.inGame || (ctx.inTime && ctx.pokemon === p))) ctx.queue.push(ev);
+    else X.emit('berryEaten', ev);
+  }
+  X.pokemonClass(base => {
+    const proto = Object.prototype.hasOwnProperty.call(base, 'recordEatenBerry') ? base : null;
+    if (!proto) { X.log('hooks (e): no Pokemon.recordEatenBerry in this build'); return; }
+    // (berryType, updateHarvest = true): every real eat, never 反刍's replay, never simulated
+    X.after(proto, 'recordEatenBerry', 'e', (self, args) => {
+      const t = args[0];
+      if (!validType(t)) return;
+      ate(self, t, null, ctx && ctx.inGame && ctx.pokemon === self ? args[1] === false : null);
+    });
+    X.log('hooks (e): berries eaten');
+  });
+  X.phaseClass('BerryPhase', proto => {
+    // (pokemon): once per active Pokémon of both sides, fastest first. The game's berries are eaten inside.
+    X.wrap(proto, 'eatBerries', 'e', orig => function (pokemon) {
+      const mine = X.guard('e eatBerries', () => {
+        if (!pokemon || !(X.has('berryTime') || X.has('berryEaten'))) return null;
+        const player = pokemon.isPlayer();
+        // asked before the game eats: afterwards the eaten stacks no longer match. true: the game shows the
+        // use-item animation (or the "too nervous" message) for this Pokémon itself.
+        const real = !!scene().findModifier(m => isBerry(m) && m.shouldApply(pokemon), player);
+        return { pokemon, player, real, shown: real, queue: [], inGame: true, inTime: false };
+      }, null);
+      const prev = ctx;
+      ctx = mine;
+      let r;
+      try { r = orig.apply(this, arguments); } finally { if (mine) mine.inGame = false; else ctx = prev; }
+      if (mine) {
+        const flush = () => X.guard('e berryEaten', () => { for (const ev of mine.queue.splice(0)) X.emit('berryEaten', ev); });
+        flush();
+        mine.inTime = true;
+        X.guard('e berryTime', () => { if (mine.player && B.onField(pokemon) && X.has('berryTime')) X.emit('berryTime', { pokemon }); });
+        mine.inTime = false;
+        flush(); // the mod items eaten as berries during berryTime
+        ctx = prev;
+      }
+      return r;
+    });
+    X.log('hooks (e): berry phase');
+  });
+  const nervous = p => p.getOpponents().some(o => o && o.isActive(true) && o.hasAbilityWithAttr('PreventBerryUseAbAttr'));
+  // p uses one copy of a held mod item the way a berry is eaten. 'eaten': one copy is gone; 'kept': the team's
+  // 树果袋 kept it; false: nothing happened (not held, not on the field, or 紧张感 on the other side).
+  function eatAsBerry(p, item) {
+    const key = item && item.key ? item.key : item;
+    if (!X.itemOn(key) || !B.onField(p) || X.count(p, key) < 1) return false;
+    const s = scene(), c = ctx && ctx.pokemon === p ? ctx : null, bi = p.getBattlerIndex();
+    if (nervous(p)) {
+      if (!(c && c.shown)) s.phaseManager.queueMessage(X.nameOf(p) + '因太紧张\n而无法食用树果！');
+      if (c) c.shown = true;
+      return false;
+    }
+    const keep = { value: false };
+    X.guard('e berry pouch', () => { const pouch = s.findModifier(m => m.is('PreserveBerryModifier'), true); if (pouch) pouch.apply(p, keep); });
+    if (!(c && c.shown)) s.phaseManager.unshiftNew('CommonAnimPhase', bi, bi, 2000 /* CommonAnim.USE_ITEM */);
+    if (c) c.shown = true;
+    if (!keep.value) X.take(p, key, 1);
+    X.guard('e belch', () => { p.battleData.hasEatenBerry = true; }); // 打嗝 may be used from now on, as after any berry
+    ate(p, null, key, !!keep.value);
+    return keep.value ? 'kept' : 'eaten';
+  }
+
+  X.extendBattle({
+    // HP as a share of max HP, rounded to whole percent the way the game does for its berries (49.6% reads 0.5)
+    hpRatio: p => X.guard('e hpRatio', () => p.getHpRatio(), 1),
+    berryName,
+    // every berry type for this Pokémon: [{ berry, name, count, max }]
+    berries: p => X.guard('e berries', () => berries(p), []),
+    // the berry types this Pokémon can take one more of
+    berryRoom: p => X.guard('e berryRoom', () => (!p || !p.isPlayer() || p.isFainted() ? [] : berries(p).filter(b => b.count < b.max).map(b => b.berry)), []),
+    giveBerry: (p, t) => X.guard('e giveBerry', () => giveBerry(p, t), false),
+    eatAsBerry: (p, item) => X.guard('e eatAsBerry', () => eatAsBerry(p, item), false),
+    // cut this Pokémon's berry stacks down to their limits (after a limit dropped); returns how many went
+    trimBerries: p => X.guard('e trimBerries', () => (p ? (capHooked ? trimBerries(p) : 0) + trimLikes(p) : 0), 0),
+  });
+
+  // ---- for tests ----
+  X.debug('eBerries', i => berries(scene().getPlayerParty()[i]).filter(b => b.count).map(b => b.name + '×' + b.count + '/' + b.max));
+  X.debug('eGiveBerry', (i, t) => giveBerry(scene().getPlayerParty()[i], t));
+  X.debug('eCaps', () => ({ caps: caps.slice(), likes: [...likes], hooked: capHooked, pending: Object.keys(pending), type: !!TypeCtor }));
+  X.debug('eType', t => { const ty = typeObj(t); return { id: ty.id, name: ty.name, ctor: ty.constructor.name, icon: ty.iconImage }; });
+});
+
+// ======== engine extension: f (engine/ext-f.js) ========
+// Engine extension of team f: what 光之黏土 (#8) and 防尘帐篷 (#18) need from the game.
+// It knows no item: it turns four decisions of the game into questions a mod may answer.
+//
+// ---- for mod authors (接口版本 2, added by this extension; the text for docs/MOD-API.md) ----
+// 事件（都用 api.on 接）：
+//   screenSet     一只宝可梦用招式架起光墙、反射壁或极光幕的那一刻（还没架起来）。
+//                 收到 pokemon（用招式的宝可梦）、screen（'lightScreen' 光墙 / 'reflect' 反射壁 / 'auroraVeil' 极光幕）、
+//                 turns（现在要持续几回合，原版是 5）、moveId、then(fn)。
+//                 返回数字 = 改成持续这么多回合（至少 1）。几个处理函数依次接着算。
+//                 then(fn)：真的架起来之后再做的事，fn 收到 { turns }。这一边已经有同一种壁时招式不会生效，fn 就不会被调用，
+//                 所以提示文字写在 then 里。「换场」把壁搬到对面时不会触发这个事件。
+//   weatherDamage 沙暴、冰雹在回合结束时准备伤害场上的宝可梦之前，每只问一次。
+//                 收到 pokemon、weather（'sandstorm' 沙暴 / 'hail' 冰雹）。返回 true = 这只这回合不受天气伤害
+//                 （不扣血，也不出现「沙暴袭击了××」那行字）。本来就不怕这种天气的宝可梦也会被问到。
+//   powderMove    一个粉末类招式（毒粉、麻痹粉、催眠粉、蘑菇孢子、棉孢子、粉尘、魔法粉）要对一只宝可梦生效之前。
+//                 收到 user（用招式的）、target（被瞄准的）、moveId、redirect（false）。
+//                 返回 true = 对 target 没有效果（和草属性宝可梦一样，显示游戏自己的「对××没有效果」）。
+//                 愤怒粉：对手用了愤怒粉、target 要出单体招式时也会来问一次，这时 redirect 是 true，user 是用愤怒粉的对手，
+//                 返回 true = target 的招式不会被愤怒粉吸过去。
+//   effectSpore   一只宝可梦用接触类招式打中了特性是「孢子」的宝可梦，特性要判定之前。
+//                 收到 pokemon（出招的）、holder（有孢子特性的）。返回 true = 这一下孢子特性不发动。
+// 后三个事件是「问一句、答一句」：游戏在选招界面显示效果、AI 估算时也会来问，会被问很多次。
+// 处理函数里只回答，不要发消息、不要改任何状态。有任何一个处理函数回答 true 就算 true。
+// -------------------------------------------------------------------------------------------
+CoopModsExt('f', X => {
+  const POWDER_MOVE = 2048;   // MoveFlags.POWDER_MOVE (1 << 11)
+  const TARGET_USER = 0;      // MoveTarget.USER
+  const EFFECT_SPORE = 27, OVERCOAT = 142; // AbilityId
+  const RAGE_POWDER = 476;    // MoveId
+  const SCREENS = { LIGHT_SCREEN: 'lightScreen', REFLECT: 'reflect', AURORA_VEIL: 'auroraVeil' }; // ArenaTagType -> name for mods
+  const WEATHERS = { 3: 'sandstorm', 4: 'hail' }; // WeatherType of the two damaging weathers
+
+  X.addEvent('screenSet');
+  X.addEvent('weatherDamage');
+  X.addEvent('powderMove');
+  X.addEvent('effectSpore');
+
+  // what the hooks did, for the rig (CoopMods.debug.f())
+  const seen = { hooks: {}, screenSet: 0, screenChanged: 0, weatherPhases: 0, weatherShadowed: 0, weatherPasses: [], weatherSkipped: 0, powderAsked: 0, powderBlocked: 0, redirectAsked: 0, redirectBlocked: 0, sporeAsked: 0, sporeBlocked: 0 };
+  X.debug('f', () => JSON.parse(JSON.stringify(seen)));
+
+  // yes/no question: true when any listener answers true. A listener that throws is logged and counts as no answer.
+  function askYes(name, ev) {
+    let yes = false;
+    for (const [mod, fn] of X.listeners(name)) {
+      if (X.guard('f ' + name + ' listener of ' + (mod && mod.id), () => fn(ev) === true, false)) yes = true;
+    }
+    return yes;
+  }
+
+  // ---- 1. screens: Arena.addTag(tagType, turnCount, sourceMove, sourceId, side = BOTH, quiet = false) ----
+  // One call per screen a move puts up; the tag, its maxDuration, the arena flyout and the save all take the
+  // number from this call. Court Change re-adds a screen with quiet = true and its remaining turns: left alone.
+  function hookArena(proto) {
+    return X.wrap(proto, 'addTag', 'f', orig => function (tagType, turnCount, sourceMove, sourceId, side, quiet) {
+      let args = arguments; const thens = []; let turns = turnCount;
+      X.guard('f screenSet', () => {
+        const screen = SCREENS[tagType];
+        if (!screen || quiet || !(turnCount > 0) || !X.has('screenSet')) return;
+        const s = X.scene(), src = s && s.getPokemonById ? s.getPokemonById(sourceId) : null;
+        if (!src) return;
+        seen.screenSet++;
+        for (const [mod, fn] of X.listeners('screenSet')) {
+          X.guard('f screenSet listener of ' + (mod && mod.id), () => {
+            const mine = [];
+            const r = fn({ pokemon: src, screen, turns, moveId: sourceMove == null ? null : sourceMove, then: f => { if (typeof f === 'function') mine.push(f); } });
+            if (typeof r === 'number' && isFinite(r)) turns = Math.max(1, Math.floor(r)); // 0 or less would mean "for ever" in this game
+            thens.push(...mine);
+          });
+        }
+        if (turns !== turnCount) { args = Array.prototype.slice.call(arguments); args[1] = turns; seen.screenChanged++; }
+      });
+      const added = orig.apply(this, args);
+      // false: the side had this screen already (or the type is unknown): nothing was put up, nothing to tell
+      if (added && thens.length) for (const f of thens) X.guard('f screenSet then', () => f({ turns }));
+      return added;
+    });
+  }
+
+  // ---- 2. weather damage: WeatherEffectPhase.start() ----
+  // start() calls this.executeForAll three times: (1) abilities that suppress the weather, (2) the damage loop,
+  // both synchronously, and (3) end-of-weather abilities from the callback of the weather message, later.
+  // While start() runs, the phase gets its own executeForAll that leaves the protected Pokémon out of call (2).
+  // When (1) finds the weather suppressed there is no second synchronous call and nothing is filtered.
+  X.phaseClass('WeatherEffectPhase', proto => {
+    seen.hooks.weather = X.wrap(proto, 'start', 'f', orig => function () {
+      const self = this; let shadow = null, hadOwn = false, prev;
+      X.guard('f weatherDamage', () => {
+        seen.weatherPhases++;
+        if (!X.has('weatherDamage')) return;
+        const s = X.scene(), w = s && s.arena && s.arena.weather;
+        if (!w || typeof w.isDamaging !== 'function' || !w.isDamaging() || typeof self.executeForAll !== 'function') return;
+        const weather = WEATHERS[w.weatherType] || String(w.weatherType);
+        const safe = new Set();
+        for (const p of s.getField(true)) if (p && askYes('weatherDamage', { pokemon: p, weather })) safe.add(p);
+        if (!safe.size) return; // nobody is protected: the game's phase runs untouched
+        hadOwn = Object.prototype.hasOwnProperty.call(self, 'executeForAll'); prev = self.executeForAll;
+        const exec = self.executeForAll; let n = 0;
+        shadow = function (fn) {
+          n++;
+          if (n !== 2 || typeof fn !== 'function') return exec.apply(this, arguments);
+          return exec.call(this, function (p) {
+            if (safe.has(p)) { seen.weatherSkipped++; return undefined; }
+            return fn.apply(this, arguments);
+          });
+        };
+        shadow.calls = () => n;
+        self.executeForAll = shadow;
+        seen.weatherShadowed++;
+      });
+      try { return orig.apply(this, arguments); }
+      finally {
+        if (shadow) {
+          seen.weatherPasses.push(shadow.calls()); if (seen.weatherPasses.length > 20) seen.weatherPasses.shift();
+          // take our function off again before the asynchronous third pass (only if it is still ours)
+          if (Object.prototype.hasOwnProperty.call(self, 'executeForAll') && self.executeForAll === shadow) {
+            if (hadOwn) self.executeForAll = prev; else delete self.executeForAll;
+          }
+        }
+      }
+    });
+  });
+
+  // ---- 3. powder moves: Move.isTypeImmune(user, target) ----
+  // The game's own "this move has no effect on this target because of what the target is" (Grass types against
+  // powder). Asked for real hits, for the fight menu's effectiveness labels and by the enemy AI: a pure yes/no.
+  function hookMove(proto) {
+    return X.wrap(proto, 'isTypeImmune', 'f', orig => function (user, target) {
+      const immune = X.guard('f powderMove', () => {
+        if (!this.hasFlag(POWDER_MOVE) || this.moveTarget === TARGET_USER || !user || !target || user === target || !X.has('powderMove')) return false;
+        seen.powderAsked++;
+        return askYes('powderMove', { user, target, moveId: this.id, redirect: false });
+      }, false);
+      if (immune) { seen.powderBlocked++; return true; }
+      return orig.apply(this, arguments);
+    });
+  }
+
+  // ---- 4. Rage Powder: MovePhase.resolveRedirectTarget() ----
+  // The game lets Grass types and Overcoat ignore the redirect of a Rage Powder user (and only of Rage Powder:
+  // Follow Me and Spotlight keep pulling). For a protected user, answer "yes" to the Overcoat question while the
+  // game's method runs; ability redirects (Lightning Rod ...) computed in the same method stay as the game decides.
+  X.phaseClass('MovePhase', proto => {
+    seen.hooks.redirect = X.wrap(proto, 'resolveRedirectTarget', 'f', orig => function () {
+      const u = this.pokemon; let shadow = null, hadOwn = false, prev;
+      X.guard('f powderMove redirect', () => {
+        if (!u || !this.targets || this.targets.length !== 1 || !X.has('powderMove')) return;
+        const puller = u.getOpponents(true).find(o => { const t = o.getTag('CENTER_OF_ATTENTION'); return !!(t && t.powder); });
+        if (!puller) return;
+        seen.redirectAsked++;
+        if (!askYes('powderMove', { user: puller, target: u, moveId: RAGE_POWDER, redirect: true })) return;
+        hadOwn = Object.prototype.hasOwnProperty.call(u, 'hasAbility'); prev = u.hasAbility;
+        const has = u.hasAbility;
+        shadow = function (id) { return id === OVERCOAT ? true : has.apply(this, arguments); };
+        u.hasAbility = shadow;
+        seen.redirectBlocked++;
+      });
+      try { return orig.apply(this, arguments); }
+      finally {
+        if (shadow && Object.prototype.hasOwnProperty.call(u, 'hasAbility') && u.hasAbility === shadow) {
+          if (hadOwn) u.hasAbility = prev; else delete u.hasAbility;
+        }
+      }
+    });
+  });
+
+  // ---- 5. Effect Spore: EffectSporeAbAttr.canApply({ pokemon: the ability's owner, opponent: the attacker, move, ... }) ----
+  // false = the ability does nothing for this hit (the game's own exit for Grass types and Overcoat: no random
+  // number is drawn, no ability bar, no message). Only this attribute class is wrapped: Static, Poison Point,
+  // Flame Body are other classes.
+  function hookSpore(attr) {
+    const proto = attr && Object.getPrototypeOf(attr);
+    if (!proto || !Object.prototype.hasOwnProperty.call(proto, 'canApply')) return false;
+    return X.wrap(proto, 'canApply', 'f', orig => function (params) {
+      const blocked = X.guard('f effectSpore', () => {
+        // (the game also runs this check when the ability's owner uses a move on itself: nobody was hit, nothing to ask)
+        if (!params || !params.opponent || params.opponent === params.pokemon || !X.has('effectSpore')) return false;
+        seen.sporeAsked++;
+        return askYes('effectSpore', { pokemon: params.opponent, holder: params.pokemon || null });
+      }, false);
+      if (blocked) { seen.sporeBlocked++; return false; }
+      return orig.apply(this, arguments);
+    });
+  }
+  const sporeAttrOf = ab => { const a = ab && typeof ab.getAttrs === 'function' ? ab.getAttrs('EffectSporeAbAttr') : null; return a && a[0] ? a[0] : null; };
+  let pokemonProto = null;
+  X.pokemonClass(proto => { pokemonProto = proto; });
+
+  // The Arena, Move and ability-attribute classes are not phases: find one object of each when the game has
+  // them (a tick is every 200 ms while a mod is on in a co-op room) and wrap its prototype, once.
+  let arenaProto = null, moveDone = false, sporeDone = false, sporeTried = false;
+  X.onTick(s => {
+    if (s.arena) {
+      const ap = X.protoWith(s.arena, 'addTag');
+      if (ap && ap !== arenaProto) { arenaProto = ap; seen.hooks.arena = hookArena(ap); }
+    }
+    if (moveDone && sporeDone) return;
+    const party = (s.getPlayerParty && s.getPlayerParty()) || [];
+    if (!moveDone) {
+      for (const p of party) {
+        const pm = p && p.getMoveset && p.getMoveset()[0], mv = pm && pm.getMove && pm.getMove();
+        const mp = mv && X.protoWith(mv, 'isTypeImmune');
+        if (mp) { moveDone = true; seen.hooks.move = hookMove(mp); break; }
+      }
+    }
+    if (!sporeDone && pokemonProto) {
+      // Pokemon.getAbility() answers allAbilities[summonData.ability] when that is set: asked on a stand-in
+      // object, so no real Pokémon is touched. Tried once; after that, look at who is on the field.
+      let attr = null;
+      if (!sporeTried) {
+        sporeTried = true;
+        attr = X.guard('f effect spore lookup', () => sporeAttrOf(pokemonProto.getAbility.call({ summonData: { ability: EFFECT_SPORE } })), null);
+        if (!attr) X.log('f: Effect Spore not found through getAbility, waiting for one on the field');
+      } else if (s.currentBattle && s.getField) {
+        attr = X.guard('f effect spore on field', () => {
+          for (const p of s.getField(true)) {
+            const a = sporeAttrOf(p.getAbility()) || sporeAttrOf(p.getPassiveAbility && p.getPassiveAbility());
+            if (a) return a;
+          }
+          return null;
+        }, null);
+      }
+      if (attr) { sporeDone = true; seen.hooks.spore = hookSpore(attr); }
+    }
+  });
+});

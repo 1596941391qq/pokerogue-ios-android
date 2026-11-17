@@ -45,7 +45,7 @@ window.Coop = (function () {
     };
   }
 
-  const NEAR_RELAY_IP = '103.70.77.178'; // the near coturn (P302's Hong Kong box)
+  const NEAR_RELAY_IP = '182.16.109.94'; // the near coturn (P302's Hong Kong box; was 103.70.77.178 before 11-17)
   async function stats(pc) {
     const st = await pc.getStats(), by = {};
     st.forEach(s => { by[s.id] = s; });

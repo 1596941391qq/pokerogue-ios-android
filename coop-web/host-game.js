@@ -42,7 +42,7 @@ window.CoopGame = (function () {
   const STATUS = ['', '中毒', '剧毒', '麻痹', '睡眠', '冰冻', '灼伤', '濒死'];
 
   const st = {
-    stage: false, owner: null, shared: null, turnKey: '', pick: null, pickSlot: -1, choice: null, intent2: null, applying: false,
+    stage: false, owner: null, shared: null, event: false, turnKey: '', pick: null, pickSlot: -1, choice: null, intent2: null, applying: false,
     p1: null, p2: null, mons: [], reward: null, starters: null, streak: 0, sent: {},
   };
   const listeners = [];
@@ -169,15 +169,34 @@ window.CoopGame = (function () {
     if ('say' in m) shout('p2', m.say);
     if (m.sync && !st.applying) resync(); // the phone cleared its panels after a hiccup only it saw
   });
+  // A mystery encounter is answered by either player (host-team.js). Two guards so that nobody confirms by
+  // accident what they did not see: a confirm is dropped when the other player pressed anything in the last
+  // EVENT_QUIET_MS (they may just have moved the cursor), and 2P's confirm is dropped for EVENT_OPEN_MS after
+  // the options come up (2P's picture is late; an 确认 meant for the text before would land on an option).
+  const EVENT_QUIET_MS = 600, EVENT_OPEN_MS = 900, CONFIRM_KEYS = [' ', 'Enter', 'z', 'Z'];
+  const lastKey = { p1: 0, p2: 0 };
+  let eventMode = null, eventModeAt = 0;
+  function eventPress(who, confirm) { // false: drop this press
+    if (!st.event || !online()) return true;
+    const now = Date.now(), mode = uiMode();
+    if (mode !== eventMode) { eventMode = mode; eventModeAt = now; }
+    if (confirm) {
+      if (now - lastKey[who === 'p1' ? 'p2' : 'p1'] < EVENT_QUIET_MS) { log('event: ' + T.label(who) + ' confirm dropped, the other just pressed'); return false; }
+      if (who === 'p2' && mode === 'MYSTERY_ENCOUNTER' && now - eventModeAt < EVENT_OPEN_MS) { log('event: 2P confirm dropped, the options just came up'); return false; }
+    }
+    lastKey[who] = now;
+    return true;
+  }
   // presses: the guest is ignored while 1P's Pokémon chooses (and while the host enters 2P's pick) ...
-  L.setGate(() => !(st.owner === 'p1' || st.applying));
+  L.setGate((btn, down) => !(st.owner === 'p1' || st.applying) && (down === false || eventPress('p2', btn === 'a')));
   // ... and 1P's own keyboard is ignored while 2P's Pokémon chooses (the guest's synthetic keys are untrusted)
   // Only while 2P is connected: with 2P away 1P's keyboard does everything.
   window.addEventListener('keydown', e => {
     if (!e.isTrusted) return;
     const f = ['F1', 'F2', 'F3', 'F4'].indexOf(e.key);
     if (f >= 0) { e.stopImmediatePropagation(); e.preventDefault(); if (!e.repeat) shout('p1', f); return; } // 1P's shouts
-    if (st.owner === 'p2' && online()) { e.stopImmediatePropagation(); e.preventDefault(); }
+    if (st.owner === 'p2' && online()) { e.stopImmediatePropagation(); e.preventDefault(); return; }
+    if (!e.repeat && !eventPress('p1', CONFIRM_KEYS.includes(e.key))) { e.stopImmediatePropagation(); e.preventDefault(); }
   }, true);
   // Same rule for the game's on-screen touch buttons (1P hosting from a phone): they feed the game directly,
   // not through key events, so their presses are stopped here. Releases always pass so no button sticks.
@@ -239,8 +258,10 @@ window.CoopGame = (function () {
       } else if (st.reward) {
         const r = st.reward, first = r.round === 1;
         st.owner = r.picker;
-        if (r.single) { // a special reward screen: one pick only, no 5 选 2
-          sendState('turn', r.picker === 'p2' ? { turn: 'p2', text: '轮到你挑奖励', sub: '' } : { turn: 'p1', text: '1P 在挑奖励', sub: '' });
+        if (r.set) { // a set list (fixed battle, mystery encounter): not five, but both still pick
+          sendState('turn', r.picker === 'p2'
+            ? { turn: 'p2', text: r.empty ? '轮到你逛商店' : '轮到你挑奖励', sub: first ? '你先挑，剩下的给 1P' : r.empty ? '奖励被 1P 拿走了，商店还能买' : '1P 挑过了，剩下的和商店归你' }
+            : { turn: 'p1', text: r.empty ? '1P 在逛商店' : '1P 在挑奖励', sub: first ? '1P 挑完轮到你' : '你挑过了' });
         } else sendState('turn', r.picker === 'p2'
           ? { turn: 'p2', text: '轮到你挑奖励（5 选 2）', sub: first ? '你先挑，剩下的给 1P' : '1P 挑过了，从剩下的里挑' }
           : { turn: 'p1', text: '1P 在挑奖励（5 选 2）', sub: first ? '1P 挑完轮到你' : '你挑过了' });
@@ -264,10 +285,14 @@ window.CoopGame = (function () {
         sendState('turn', shared === 'p2' ? { turn: 'p2', text: '轮到你决定', sub: '' } : { turn: 'p1', text: '1P 在决定', sub: '' });
       } else {
         st.owner = null;
-        sendState('turn', { turn: null, text: '两人都能操作', sub: '' });
+        st.event = !!(ph && ph.phaseName && ph.phaseName.indexOf('MysteryEncounter') >= 0);
+        if (st.event) sendState('turn', { turn: null, text: '神秘事件：两个人都能选', sub: '商量好再按，先按的算数' });
+        else sendState('turn', { turn: null, text: '两人都能操作', sub: '' });
       }
+      if (st.owner) st.event = false;
       return;
     }
+    st.event = false;
     st.reward = null;
     const key = b.waveIndex + ':' + b.turn;
     if (key !== st.turnKey) {

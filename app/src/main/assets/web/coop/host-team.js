@@ -17,8 +17,12 @@
 //   1P's always replaces 1P's. When a player has nothing left to send out, the slot goes to the other.
 // - Rewards are 5 to choose from and both get one (5 选 2): one picks, then the other picks from the
 //   rest. Who goes first alternates by wave. An item that goes on a Pokémon only goes on your own, except
-//   medicine (HP, revive, status, PP: gone once used), which may be used on the teammate's Pokémon too.
-//   A special reward (a set list: fixed battles, mystery encounters) is one pick, by the same alternation.
+//   medicine (HP, revive, status, PP: gone once used) and evolution / form-change items (mega stones...),
+//   which may be used on the teammate's Pokémon too.
+//   A set list (fixed battles, mystery encounters) goes the same way: one picks, the other picks from the
+//   rest; when nothing is left the other still gets the screen for the shop.
+// - A mystery encounter belongs to both: either player may answer it, what it costs is taken half each and
+//   what it pays is split (asked for by players, 11-16: 只能其中一个人和事件互动).
 // - Held-item transfer, discard, fusion, reordering and releasing (on the reward screen's party menu) only
 //   touch the picker's own Pokémon; after a catch only the catcher's six count: when they are full the
 //   game asks which of their own to release (the teammate's room does not matter).
@@ -399,12 +403,41 @@ window.CoopTeam = (function () {
     if (reorder(next)) place(h);
   }
   // medicine: used up on the spot (HP, revive, status, PP). May be used on the teammate's Pokémon.
-  const MEDICINE = ['PokemonHpRestoreModifierType', 'PokemonStatusHealModifierType', 'PokemonPpRestoreModifierType', 'PokemonAllMovePpRestoreModifierType'];
+  // So may an evolution item and a form-change item (mega stones...): the one who picks it up is often not
+  // the one whose Pokémon needs it (asked for by players, 11-16).
+  const MEDICINE = ['PokemonHpRestoreModifierType', 'PokemonStatusHealModifierType', 'PokemonPpRestoreModifierType', 'PokemonAllMovePpRestoreModifierType',
+    'EvolutionItemModifierType', 'FormChangeItemModifierType'];
   function isMedicine(type) {
     for (let p = type && Object.getPrototypeOf(type); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
       if (p.constructor && MEDICINE.includes(p.constructor.name)) return true;
     }
     return false;
+  }
+
+  // ---- the reward screen: 确认 / 取消 wait until every ball has opened ----
+  // The game takes input on the reward screen a moment before its balls have opened, and every option still
+  // has a timer that opens its ball. Leaving the screen in that moment (a reroll, a pick, a skip) destroys the
+  // options under those timers; the timer then throws inside the game loop ("reading 'sys'") and the game
+  // stands still for good. Seen 11-17 with a reroll pressed the instant the screen came up. So the two buttons
+  // do nothing while a ball is still closed, for at most 3 s after the first press that came too early.
+  function hookReward(s) {
+    const h = ((s.ui && s.ui.handlers) || []).find(x => x && x.constructor && x.constructor.name === 'ModifierSelectUiHandler');
+    if (!h || h.__coopBalls) return;
+    h.__coopBalls = true;
+    const input = h.processInput;
+    h.processInput = function (button) {
+      try {
+        if ((button === 5 || button === 6) && this.active && this.awaitingActionInput) {
+          const opts = this.options || [];
+          const closed = opts.some(o => o && o.pb && o.pb.scene && o.pb.frame && !/_open$/.test(String(o.pb.frame.name)));
+          if (closed) {
+            if (!this.__coopHold || this.__coopHold.first !== opts[0]) this.__coopHold = { first: opts[0], t: Date.now() };
+            if (Date.now() - this.__coopHold.t < 3000) return false;
+          }
+        }
+      } catch (e) { log('reward balls error', String(e)); }
+      return input.call(this, button);
+    };
   }
 
   // ---- the party menu only offers your own Pokémon ----
@@ -456,7 +489,7 @@ window.CoopTeam = (function () {
             const ph = scene().phaseManager.getCurrentPhase(), item = ph && ph.__coopItem;
             medicine = mode !== 9 && !!who && isMedicine(item) && (typeof item.selectFilter === 'function' ? args[3] === item.selectFilter : args[3] == null);
           } catch {}
-          if (medicine) log('party menu: medicine, ' + label(who) + ' may use it on either team');
+          if (medicine) log('party menu: medicine or evolution / form item, ' + label(who) + ' may use it on either team');
         }
         else if (mode === 3) { // REVIVAL_BLESSING: the user's owner revives one of their own (no cancel in this mode)
           who = ownerOf(party()[args[1]]);
@@ -663,7 +696,7 @@ window.CoopTeam = (function () {
       const c = this.__coop;
       if (c && !c.ended) {
         c.ended = true;
-        try { if (c.round === 1 && !c.rerolled && !c.single) queueSecondRound(this, c); } catch (e) { log('second round error', String(e)); }
+        try { if (c.round === 1 && !c.rerolled) queueSecondRound(this, c); } catch (e) { log('second round error', String(e)); }
       }
       return end.apply(this, arguments);
     };
@@ -673,13 +706,16 @@ window.CoopTeam = (function () {
     const rest = (ph.typeOptions || []).filter((o, i) => i !== c.took);
     // a TM picked, its learning cancelled and something picked again: replace the round queued the first time
     pm.tryRemovePhase('SelectModifierPhase', p => p.__coop && p.__coop.round === 2);
-    if (!rest.length) return;
-    making = { round: 2, picker: other(c.picker) };
+    // nothing left (a set list of one, or a shop-only screen): the other still gets the screen, for the shop.
+    // Not for a normal reward (never empty) and not when the other has no Pokémon to shop for.
+    if (!rest.length && !(c.set && count(other(c.picker)))) return;
+    making = { round: 2, picker: other(c.picker), set: !!c.set };
+    if (!rest.length) making.empty = true;
     let next;
     try { next = pm.create('SelectModifierPhase', 0, undefined, { guaranteedModifierTypeOptions: rest, fillRemaining: false, allowLuckUpgrades: false }, true); }
     finally { making = null; }
     pm.unshiftPhase(next);
-    log('rewards: ' + label(c.picker) + (c.took == null ? ' skipped' : ' took one') + ', ' + label(next.__coop.picker) + ' picks from ' + rest.length);
+    log('rewards: ' + label(c.picker) + (c.took == null ? ' skipped' : ' took one') + ', ' + label(next.__coop.picker) + (rest.length ? ' picks from ' + rest.length : ' gets the shop'));
   }
   function tagReward(ph, args) {
     const [rerollCount, , custom, isCopy] = args;
@@ -689,20 +725,18 @@ window.CoopTeam = (function () {
     const curCo = cur && cur.phaseName === 'SelectModifierPhase' && cur.__coop;
     if (curCo && (isCopy || rerollCount > 0)) { // the same round again: a reroll, or the copy kept for a TM
       ph.__coop = { round: curCo.round, picker: curCo.picker };
-      if (curCo.single) ph.__coop.single = true;
+      if (curCo.set) ph.__coop.set = true;
       return;
     }
     if (!isCopy && !rerollCount) {
       const wave = (scene().currentBattle || {}).waveIndex || 0, picker = wave % 2 ? 'p2' : 'p1';
       if (!custom) ph.__coop = { round: 1, picker }; // the normal reward after a battle
       else {
-        // A set list. After a fixed trainer battle (the rival, a team boss...) both players pick: the second one
-        // from what the first left, and with the shop, like after any other battle (two reports 11-16: 打完艾薇,
-        // 只有一个人能选). Mystery encounters and the shop-only screen stay one pick, no second round.
-        let event = true;
-        try { const b = scene().currentBattle; event = !b || (typeof b.isBattleMysteryEncounter === 'function' ? b.isBattleMysteryEncounter() : !!b.mysteryEncounter); } catch {}
-        if (event) { ph.__coop = { round: 1, picker, single: true }; log('rewards: special, one pick by ' + label(picker)); }
-        else { ph.__coop = { round: 1, picker }; log('rewards: set list after a fixed battle, ' + label(picker) + ' picks first'); }
+        // A set list (after the rival or a team boss, or from a mystery encounter): both players pick, the
+        // second one from what the first left, and with the shop, like after any other battle (reports 11-16:
+        // 打完艾薇, 只有一个人能选; 另一个人甚至连花钱回血都做不到).
+        ph.__coop = { round: 1, picker, set: true };
+        log('rewards: set list, ' + label(picker) + ' picks first');
       }
     }
   }
@@ -787,7 +821,7 @@ window.CoopTeam = (function () {
   // reads and writes that player's share; otherwise it sees the two added together.
   // - Whose business: the reward screen is the picker's (buying, rerolling, a money or ball reward picked);
   //   a Pokémon choosing its command is its owner's (the ball menu shows their balls); a throw is the
-  //   thrower's; a mystery encounter is its decider's.
+  //   thrower's. A mystery encounter is both players' (half each).
   // - Anything else that comes in (prize money after a battle) is split in half; anything else that goes
   //   out is taken half each.
   // - The save file keeps the totals, as the game expects, plus one extra block "coop" that the game itself
@@ -811,8 +845,7 @@ window.CoopTeam = (function () {
     if (n === 'CommandPhase' || n === 'SelectTargetPhase') return ownerOf(party()[ph.fieldIndex]);
     if (n === 'AttemptCapturePhase') return catcher();
     if (n === 'EvolutionPhase') return ownerOf(ph.pokemon); // the Poké Ball a Shedinja needs is its owner's
-    if (n.indexOf('MysteryEncounter') >= 0) { const b = scene().currentBattle; return b ? mePicker(b.waveIndex || 0) : null; }
-    return null;
+    return null; // a mystery encounter too: both pay, both are paid
   }
   // change one player's share, or both: what comes in is halved, what goes out is taken half each
   function give(box, who, d) {
@@ -956,9 +989,9 @@ window.CoopTeam = (function () {
   const purseNow = () => ({ money: { p1: purse.money.p1, p2: purse.money.p2 }, balls: { p1: { ...purse.balls.p1 }, p2: { ...purse.balls.p2 } } });
 
   // ---- one shared question: who answers ----
-  // null when the current phase is not a shared question. Mystery encounter: the one who does NOT get the
-  // reward pick of this wave, so on such a wave one answers and the other takes the reward. Biome choice
-  // comes every 10 waves (always an even wave), so it alternates by tens. An evolution is its owner's.
+  // null when the current phase is not one player's question. A mystery encounter is nobody's alone: either
+  // player may answer (host-game.js keeps the two from pressing over each other). Biome choice comes every
+  // 10 waves (always an even wave), so it alternates by tens. An evolution is its owner's.
   function sharedPicker() {
     const s = scene();
     let ph = null;
@@ -967,20 +1000,31 @@ window.CoopTeam = (function () {
     if (!ph || !b) return null;
     const wave = b.waveIndex || 0, name = ph.phaseName;
     let who = null;
-    if (name === 'MysteryEncounterPhase') return mePicker(wave);
-    else if (name === 'SelectBiomePhase') who = Math.floor(wave / 10) % 2 ? 'p1' : 'p2';
+    if (name === 'SelectBiomePhase') who = Math.floor(wave / 10) % 2 ? 'p1' : 'p2';
     else if (name === 'EvolutionPhase' || name === 'FormChangePhase') who = ownerOf(ph.pokemon);
     if (who && !count(who) && count(other(who))) who = other(who); // someone with no Pokémon does not answer
     return who;
   }
 
+  // A round with no reward left is the game's shop-only screen: its cursor starts on 继续, so one 确认 would
+  // leave before the player has seen the shop. Start on the shop's first item instead (once per screen).
+  function shopFirst(s) {
+    const ph = s.phaseManager.getCurrentPhase(), c = ph && ph.phaseName === 'SelectModifierPhase' && ph.__coop;
+    if (!c || !c.empty || c.cursorSet) return;
+    const h = s.ui.getHandler();
+    if (!h || !h.awaitingActionInput || typeof h.setRowCursor !== 'function' || !Array.isArray(h.shopOptionsRows)) return;
+    c.cursorSet = true;
+    if (!h.shopOptionsRows.length || (h.options && h.options.length)) return;
+    try { h.setRowCursor(2); h.setCursor(0); log('rewards: nothing left, ' + label(c.picker) + ' starts in the shop'); } catch (e) { log('shop cursor error', String(e)); }
+  }
   setInterval(() => {
     const s = scene();
     if (!s || !s.phaseManager) return;
-    try { hookPhases(s); hookParty(s); hookStarters(s); hookPurse(s); hookJoin(s); watchBalls(); ownersFromSave(s); assign(); enemyRule(); purseTick(s); } catch (e) { log('team error', String(e)); }
+    try { shopFirst(s); } catch (e) { log('shop cursor error', String(e)); }
+    try { hookPhases(s); hookParty(s); hookReward(s); hookStarters(s); hookPurse(s); hookJoin(s); watchBalls(); ownersFromSave(s); assign(); enemyRule(); purseTick(s); } catch (e) { log('team error', String(e)); }
   }, 150);
 
-  // the reward round on screen now: {round, picker} or null; a special one-pick reward has single: true
+  // the reward round on screen now: {round, picker} or null; a set list (not the normal 5) has set: true
   function reward() {
     const s = scene();
     try { const ph = s.phaseManager.getCurrentPhase(); return ph && ph.phaseName === 'SelectModifierPhase' && ph.__coop ? ph.__coop : null; } catch { return null; }
