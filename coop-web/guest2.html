@@ -497,6 +497,8 @@
 
   async function onOffer(sdp, n) {
     if (pc) pc.close();
+    if (jbMs) setJb(0);
+    vRx = aRx = null; jbPrev = null;
     pc = new RTCPeerConnection({ iceServers: servers });
     const q = ice = Coop.iceQueue(pc);
     gathered = {};
@@ -505,8 +507,10 @@
     pc.ontrack = e => {
       // video and the game's audio arrive as two tracks of one stream
       const v = $('v'), st = e.streams[0] || new MediaStream([e.track]);
-      // show frames as they come: no smoothing buffer (a button press is seen sooner)
+      // show frames as they come: no smoothing buffer (a button press is seen sooner); jbTick below adds one
+      // only on relayed links that are losing packets
       try { e.receiver.playoutDelayHint = 0; e.receiver.jitterBufferTarget = 0; } catch {}
+      if (e.track.kind === 'video') vRx = e.receiver; else aRx = e.receiver;
       if (v.srcObject !== st) v.srcObject = st;
       v.play().catch(() => {});
       if (e.track.kind === 'video') $('wait').style.display = 'none';
@@ -553,13 +557,54 @@
     if (wasDown) { wasDown = false; send({ sync: 1 }); } // we cleared the panel in linkDown: ask for the state again
     const took = downSince ? Math.round((Date.now() - downSince) / 1000) : 0, asked = tries;
     downSince = 0; hostGone = false; silent = false; tries = 0;
-    if (saidUp !== pc) { const mine = saidUp = pc; setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'connected', took, tries: asked, gathered, device: Coop.device(), ...(await Coop.stats(mine)) }); }, 3000);
+    tickAt = Date.now();
+    if (saidUp !== pc) { const mine = saidUp = pc; setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'connected', took, tries: asked, gathered, device: Coop.device(), ...jbInfo(), ...(await Coop.stats(mine)) }); }, 3000);
       // 11-16: a second look after a minute of play, when the round trip has settled (relay A/B, see signal.js armOf)
-      setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'steady', device: Coop.device(), ...(await Coop.stats(mine)) }); }, 60000); }
+      setTimeout(async () => { if (mine === pc && linkOk()) Coop.report({ role: 'guest', room, state: 'steady', device: Coop.device(), ...jbInfo(), ...(await Coop.stats(mine)) }); }, 60000); }
     conn(true, '已连接'); $('conn').classList.remove('re');
     if ($('v').srcObject) $('wait').style.display = 'none';
     applySound();
   }
+  // ---- 11-18 (小榆林): a smoothing buffer only where it helps ----
+  // On a relayed link that is losing packets (mostly the host's 4G uplink) a lost video packet is resent one round
+  // trip later (~160 ms through the Hong Kong relay). With no buffer the frames behind it stall and then rush out:
+  // the skipping players see. There a buffer of about one round trip (100-200 ms) lets the resend arrive in time.
+  // Direct and clean links keep showing frames as they come; after 30 s without loss the buffer goes back to 0.
+  // Most rooms (by room code) get it, the rest are the comparison: reports carry jb ('on'/'off'), the buffer in
+  // use and the freeze counts (tools/relay-ab.py). Picture quality is never touched (hacking 11-16).
+  // 11-18 hacking「你觉得不严重的话可以加缓冲」: 3 rooms in 4 get it, 1 in 4 stays without as the comparison
+  const jbArm = () => [...room].reduce((a, c) => a + c.charCodeAt(0), 0) % 4 ? 'on' : 'off'; // room is set on join
+  let vRx = null, aRx = null, jbMs = 0, jbMax = 0, jbSince = 0, jbSec = 0, jbCalm = 0, jbPrev = null, tickAt = 0;
+  function setJb(ms) {
+    if (ms === jbMs) return;
+    const now = Date.now();
+    if (jbMs && jbSince) jbSec += (now - jbSince) / 1000;
+    jbMs = ms; jbSince = ms ? now : 0; jbMax = Math.max(jbMax, ms);
+    for (const r of [vRx, aRx]) if (r) try { r.jitterBufferTarget = ms; r.playoutDelayHint = ms / 1000; } catch {}
+  }
+  function jbInfo() { return { jb: jbArm(), jbMs, jbMax, jbSec: Math.round(jbSec + (jbMs && jbSince ? (Date.now() - jbSince) / 1000 : 0)) }; }
+  async function jbTick() {
+    const mine = pc;
+    if (!mine || !linkOk()) return;
+    let st; try { st = await mine.getStats(); } catch { return; }
+    if (mine !== pc) return;
+    const by = {}; let inV = null, pair = null;
+    st.forEach(s => { by[s.id] = s; if (s.type === 'inbound-rtp' && s.kind === 'video') inV = s; });
+    st.forEach(s => { if (s.type === 'transport' && s.selectedCandidatePairId) pair = by[s.selectedCandidatePairId]; });
+    if (!inV) return;
+    const relayed = !!pair && [pair.localCandidateId, pair.remoteCandidateId].some(id => (by[id] || {}).candidateType === 'relay');
+    const rtt = pair && pair.currentRoundTripTime != null ? pair.currentRoundTripTime * 1000 : 160;
+    const cur = { lost: inV.packetsLost || 0, got: inV.packetsReceived || 0 }, prev = jbPrev;
+    jbPrev = cur;
+    if (!prev || cur.got < prev.got) return;
+    const dl = Math.max(0, cur.lost - prev.lost), loss = dl / Math.max(1, dl + cur.got - prev.got);
+    if (loss >= 0.005) jbCalm = 0; else jbCalm++;
+    if (jbArm() === 'on' && relayed && loss >= 0.02) setJb(Math.round(Math.min(200, Math.max(100, rtt + 40)) / 20) * 20);
+    else if (jbMs && jbCalm >= 6) setJb(0); // 6 ticks x 5 s
+    // relayed links report every 2 minutes: freezes per arm are the yardstick
+    if (relayed && Date.now() - tickAt > 120000) { tickAt = Date.now(); Coop.report({ role: 'guest', room, state: 'tick', device: Coop.device(), ...jbInfo(), ...(await Coop.stats(mine)) }); }
+  }
+  setInterval(jbTick, 5000);
   function linkDown() {
     if (!downSince) downSince = Date.now();
     wasDown = true;

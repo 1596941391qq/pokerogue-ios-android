@@ -185,11 +185,13 @@ window.CoopTeam = (function () {
   // The game asks "party full, release one?" at six in the party. The co-op build asks this hook instead
   // (the "full" and "mefull" patches in patch-coop.mjs / patch-web.mjs): full means the one who gets the
   // Pokémon already has their six, however many the teammate has.
+  // a mod may lower how many Pokémon each player may have (mod interface v3, window.PRS_PARTY_MAX of host-mods.js)
+  const capNow = () => { try { const n = window.PRS_PARTY_MAX ? Number(window.PRS_PARTY_MAX()) : CAP; return n >= 1 && n <= CAP ? Math.floor(n) : CAP; } catch { return CAP; } };
   window.PRS_COOP_FULL = () => {
     try {
       const w = receiver();
       joining = { who: w, wave: waveNow() };
-      return count(w) >= CAP || party().length >= 2 * CAP;
+      return count(w) >= capNow() || party().length >= 2 * CAP;
     } catch (e) { log('full check error', String(e)); return party().length >= SLOTS; }
   };
   const saveOwners = () => { try { localStorage.setItem(KEY, JSON.stringify(owners)); } catch {} };
@@ -230,7 +232,7 @@ window.CoopTeam = (function () {
       pp.handleSpecialEvolutions = function (...a) {
         const l = party(), who = ownerOf(this), before = new Set(l);
         let rest = null, r;
-        if (who && l.length >= SLOTS && l.length < 2 * CAP && count(who) < CAP) rest = l.splice(SLOTS - 1);
+        if (who && l.length >= SLOTS && l.length < 2 * CAP && count(who) < capNow()) rest = l.splice(SLOTS - 1);
         try { r = special.apply(this, a); } finally { if (rest) l.push(...rest); }
         try {
           l.filter(p => !before.has(p)).forEach(p => { // the Shedinja left behind: its owner's, last in the party
@@ -573,7 +575,7 @@ window.CoopTeam = (function () {
   let starterOwners = [], startersPicked = false;
   let starterHandler = null;
   const round = { n: 1, first: null, spent: 0 }; // first: 1P's picks, kept while 2P picks
-  const startLimit = () => { const m = (scene().gameMode || {}).modeId; return m === 1 || m === 2 ? 15 : 10; };
+  const startLimit = () => { const m = (scene().gameMode || {}).modeId; if (m === 1 || m === 2) return 15; try { const n = window.PRS_POINTS ? Number(window.PRS_POINTS()) : 10; return n >= 1 && n <= 20 ? Math.floor(n) : 10; } catch { return 10; } }; // PRS_POINTS: a mod may change the classic 10
   const starterCost = ids => ids.reduce((a, id) => a + scene().gameData.getSpeciesStarterValue(id), 0);
   // whose round it is
   function starterPicker() {
@@ -628,13 +630,14 @@ window.CoopTeam = (function () {
     };
     log('starters: two rounds, own points');
   }
+  const starterCap = () => { try { const n = window.PRS_STARTER_MAX ? Number(window.PRS_STARTER_MAX()) : CAP; return n >= 1 && n <= CAP ? Math.floor(n) : CAP; } catch { return CAP; } };
   function starters() {
     const h = starterHandler;
     if (!h || !h.active) return null;
     const lim = startLimit(), now = starterCost(h.partyStarterIds || []), n = (h.partyStarterIds || []).length;
     const first = round.n === 1;
     return {
-      picker: starterPicker(), round: round.n, lim, cap: CAP,
+      picker: starterPicker(), round: round.n, lim, cap: starterCap(),
       left: { p1: first ? lim - now : lim - round.spent, p2: first ? lim : lim - now },
       picks: { p1: first ? n : (round.first || []).length, p2: first ? 0 : n },
     };

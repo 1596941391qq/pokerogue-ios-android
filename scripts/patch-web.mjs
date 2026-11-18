@@ -6,9 +6,14 @@
 //    as window.PRS_SCENE, and "party full, release one?" asked by window.PRS_COOP_FULL() while a room is open
 //    (each player may have six), after a catch (assets/battle-scene-*.js) and in mystery encounters
 //    (assets/loading-scene-*.js). The doubled starter points of earlier versions are taken out again.
+//    Since 11-18 (mod interface v3) four numbers the game has written in are asked of the mod engine when it is
+//    there: starter points (window.PRS_POINTS), how many starters (PRS_STARTER_MAX), the rarity thresholds of a
+//    reward slot (PRS_T), and the party size outside a room (PRS_PARTY_MAX). Asked for by Chess12333's 进阶 mod.
 // 2. coop-web/ is copied to web/coop/ (host scripts, QR encoder, the "联机" panel).
 // 3. index.html gets coop-web/compat.js inlined at the top of <head> (message instead of a blank screen on
 //    system browsers that are too old, reload button when the game fails to load) and a tag for coop/mobile.js.
+//    Since 11-18 the mod engine and the mods (coop/host-mods.js, coop/mods-bundle.js) are loaded with every page
+//    too: a mod may run in a single-player game (mod interface v3). With no mod switched on they touch nothing.
 import { cpSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,13 +27,23 @@ const fail = msg => { console.error('patch-web: ' + msg); process.exit(1) }
 const PATCHES = [
   ['doubles', 'battle-scene', 'doCheckDoubleOverride(e){switch(bl.FIELD_SIZE_OVERRIDE){', 'doCheckDoubleOverride(e){switch(window.PRS_COOP_TEAMS?`double`:bl.FIELD_SIZE_OVERRIDE){', []],
   ['scene', 'battle-scene', 'window.gameInfo=t}getActiveKeys(){', 'window.gameInfo=t;window.PRS_SCENE=this}getActiveKeys(){', []],
-  // after a catch: "party full, release one?" is asked when the catcher has their six (the hook), not at six in all
-  ['full', 'battle-scene', 'if(B.getPlayerParty().length===6){let e={options:[{label:q.t(`partyUiHandler:summary`)', 'if((window.PRS_COOP_TEAMS&&window.PRS_COOP_FULL?window.PRS_COOP_FULL():B.getPlayerParty().length===6)){let e={options:[{label:q.t(`partyUiHandler:summary`)',
-    ['if(B.getPlayerParty().length===6||window.PRS_COOP_FULL&&window.PRS_COOP_FULL()){let e={options:[{label:q.t(`partyUiHandler:summary`)']],
+  // after a catch: "party full, release one?" is asked when the catcher has their six (the hook), not at six in all.
+  // Without a room: at window.PRS_PARTY_MAX() in the party (the mod engine; six when no mod says otherwise)
+  ['full', 'battle-scene', 'if(B.getPlayerParty().length===6){let e={options:[{label:q.t(`partyUiHandler:summary`)', 'if((window.PRS_COOP_TEAMS&&window.PRS_COOP_FULL?window.PRS_COOP_FULL():B.getPlayerParty().length>=(window.PRS_PARTY_MAX?window.PRS_PARTY_MAX():6))){let e={options:[{label:q.t(`partyUiHandler:summary`)',
+    ['if(B.getPlayerParty().length===6||window.PRS_COOP_FULL&&window.PRS_COOP_FULL()){let e={options:[{label:q.t(`partyUiHandler:summary`)',
+      'if((window.PRS_COOP_TEAMS&&window.PRS_COOP_FULL?window.PRS_COOP_FULL():B.getPlayerParty().length===6)){let e={options:[{label:q.t(`partyUiHandler:summary`)']],
   // the same question for a Pokémon obtained in a mystery encounter
-  ['mefull', 'loading-scene', 'if(b.getPlayerParty().length===6){let t={options:[{label:k.t(`partyUiHandler:summary`)', 'if((window.PRS_COOP_TEAMS&&window.PRS_COOP_FULL?window.PRS_COOP_FULL():b.getPlayerParty().length===6)){let t={options:[{label:k.t(`partyUiHandler:summary`)', []],
-  // taken out again (until 11-14 the starter points limit was doubled; now each player has their own round)
-  ['points-off', 'battle-scene', null, 'default:e.value=10}return In(1,e),e.value}', ['default:e.value=10}return In(1,e),e.value*(window.PRS_COOP_TEAMS?2:1)}']],
+  ['mefull', 'loading-scene', 'if(b.getPlayerParty().length===6){let t={options:[{label:k.t(`partyUiHandler:summary`)', 'if((window.PRS_COOP_TEAMS&&window.PRS_COOP_FULL?window.PRS_COOP_FULL():b.getPlayerParty().length>=(window.PRS_PARTY_MAX?window.PRS_PARTY_MAX():6))){let t={options:[{label:k.t(`partyUiHandler:summary`)',
+    ['if((window.PRS_COOP_TEAMS&&window.PRS_COOP_FULL?window.PRS_COOP_FULL():b.getPlayerParty().length===6)){let t={options:[{label:k.t(`partyUiHandler:summary`)']],
+  // limits a mod may change (mod interface v3, coop/host-mods.js defines the window.PRS_* functions; each answers
+  // the game's own number while no mod says otherwise). points: the starter points of a classic run (until
+  // 11-14 this place doubled them in a room: that form is brought up to date too)
+  ['points', 'battle-scene', 'default:e.value=10}return In(1,e),e.value}', 'default:e.value=(window.PRS_POINTS?window.PRS_POINTS():10)}return In(1,e),e.value}', ['default:e.value=10}return In(1,e),e.value*(window.PRS_COOP_TEAMS?2:1)}']],
+  // how many starters may be picked (adding one, and the "random" button)
+  ['starteradd', 'battle-scene', 'this.partyStarterIds.length<6', 'this.partyStarterIds.length<(window.PRS_STARTER_MAX?window.PRS_STARTER_MAX():6)', []],
+  ['starterrand', 'battle-scene', 'this.partyStarterIds.length>=6', 'this.partyStarterIds.length>=(window.PRS_STARTER_MAX?window.PRS_STARTER_MAX():6)', []],
+  // the rarity of a reward slot: the roll of 0..1023 against three thresholds
+  ['rewardtier', 'loading-scene', 't>255?0:t>60?1:t>12?2:t?3:4', 't>(window.PRS_T?window.PRS_T(2):255)?0:t>(window.PRS_T?window.PRS_T(1):60)?1:t>(window.PRS_T?window.PRS_T(0):12)?2:t?3:4', []],
 ]
 
 // Apply PATCHES to the game build in <dir>/assets. Every patch must be found exactly once in exactly one file
@@ -56,7 +71,7 @@ function patchGame(dir, tag) {
 }
 const patched = patchGame(web, 'patch-web')
 
-const START = '<!-- prs:compat -->', END = '<!-- /prs:compat -->', TAG = '<script defer src="./coop/qrcode.js"></script><script defer src="./coop/mobile.js"></script><script defer src="./coop/gamepad.js"></script>'
+const START = '<!-- prs:compat -->', END = '<!-- /prs:compat -->', TAG = '<script defer src="./coop/qrcode.js"></script><script defer src="./coop/host-mods.js"></script><script defer src="./coop/mods-bundle.js"></script><script defer src="./coop/mobile.js"></script><script defer src="./coop/gamepad.js"></script>'
 const indexFile = path.join(web, 'index.html')
 let html = readFileSync(indexFile, 'utf8')
 const a = html.indexOf(START), b = html.indexOf(END)

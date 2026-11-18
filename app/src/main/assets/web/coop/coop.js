@@ -80,6 +80,10 @@ window.Coop = (function () {
       rttMs: pair && pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : null,
       inFps: inV ? inV.framesPerSecond : undefined, inSize: inV && inV.frameWidth ? `${inV.frameWidth}x${inV.frameHeight}` : undefined,
       inKB: inV ? Math.round(inV.bytesReceived / 1024) : undefined, lost: inV ? inV.packetsLost : undefined,
+      // 11-18: what the 2P actually saw: freezes [count, seconds], frames dropped, resend requests, average buffer
+      inFreeze: inV && inV.freezeCount != null ? [inV.freezeCount, Math.round((inV.totalFreezesDuration || 0) * 10) / 10] : undefined,
+      inGot: inV ? inV.packetsReceived : undefined, inDropped: inV ? inV.framesDropped : undefined, nack: inV ? inV.nackCount : undefined,
+      jbAvgMs: inV && inV.jitterBufferEmittedCount ? Math.round(inV.jitterBufferDelay / inV.jitterBufferEmittedCount * 1000) : undefined,
       outFps: outV ? outV.framesPerSecond : undefined, outSize: outV && outV.frameWidth ? `${outV.frameWidth}x${outV.frameHeight}` : undefined,
       outKB: outV ? Math.round(outV.bytesSent / 1024) : undefined,
     };
