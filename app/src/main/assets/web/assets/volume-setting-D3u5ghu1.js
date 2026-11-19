@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-DvfoX5Ak.js";import{i as t,n,r,t as i}from"./FadeOut-3RxuAcjS.js";var a;function init_soundfade(){return(init_soundfade=e((()=>{t(),n(),a={fadeIn:r,fadeOut:i}})))()}var o;function init_volume_setting(){return(init_volume_setting=e((()=>{o=Object.freeze({MAIN:0,BGM:1,FIELD:2,SE:3,UI:4})})))()}export{a as i,init_volume_setting as n,init_soundfade as r,o as t};
+//# sourceMappingURL=volume-setting-D3u5ghu1.js.map

@@ -11,14 +11,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GAME="$ROOT/pkmain/pokerogue"
 WEB="$ROOT/app/src/main/assets/web"
+# the official repo's own git hooks (lefthook: "pnpm install" after every checkout) are for its developers;
+# here they only fail when pnpm is not on PATH, which makes the checkout below report an error
+export LEFTHOOK=0
 
 if [ ! -f "$GAME/package.json" ]; then
   git -C "$ROOT" submodule update --init --depth 1 pkmain/pokerogue
 fi
 
 if [ "${1:-}" != "" ]; then
-  git -C "$GAME" fetch --depth 1 origin "refs/tags/$1:refs/tags/$1" 2>/dev/null \
-    || git -C "$GAME" fetch --depth 1 origin "$1"
+  git -C "$GAME" fetch --depth 1 --no-recurse-submodules origin "refs/tags/$1:refs/tags/$1" 2>/dev/null \
+    || git -C "$GAME" fetch --depth 1 --no-recurse-submodules origin "$1"
   git -C "$GAME" checkout -q "$1" 2>/dev/null || git -C "$GAME" checkout -q FETCH_HEAD
 fi
 
