@@ -3259,3 +3259,488 @@ CoopModsExt('g', X => {
   X.debug('g', () => ({ ...seen, setups: Object.fromEntries(Object.keys(setups).map(id => [id, valueOf(id)])), limits: { partyMax: partyMax(), starterMax: starterMax(), points: window.PRS_POINTS(), t: [0, 1, 2].map(window.PRS_T) }, inSetup: X.inSetup() }));
   X.debug('gSet', (id, v) => setValue(id, v, 'debug'));
 });
+
+// ======== engine extension: h (engine/ext-h.js) ========
+// Engine extension h: what the mod 训练家提升 (trainer-growth) needs. Written by chenjunjue (GitHub xiaochen2245),
+// sent as pokerogue-desktop pull request #1 (coop/ext-trainer-growth.js there); moved here with its name changed and one addition (below), so that the desktop and the mobile build both carry it. Comments are the author's (简体中文).
+//   api.meta() / api.metaSave()   a mod's own data outside any run (per device, localStorage prs-mod-meta-<id>)
+//   api.metaPanel(def)            lines a player upgrades with points, drawn in the list of mods
+//   api.dexProgress(), api.dexTotal(), api.rng
+//   events pokemonCaught, gachaEggTier, gachaEggBoosted, gachaEggMark, gachaPull, pokemonStatBonus, itemInfo
+// Added here: when a mod is switched off, the stat bonus and the icon are taken away at once (X.onSwitch at the end).
+// 引擎扩展（本地）：「训练家提升」要用的几个钩子，普通 mod 接口里没有，另外还提供一个局外数据仓库。
+//
+//   1. 捕捉到宝可梦：游戏里所有「这只宝可梦被收下了」都走 GameData.setPokemonCaught()
+//      （src/system/game-data.ts）。第一次记下图鉴的那一次就是「第一次捕捉」。
+//   2. 扭蛋机的蛋：Egg.prototype.rollEggTier()（src/data/egg.ts）是抽蛋时定稀有度的地方。
+//      游戏的稀有度概率（src/data/balance/rates.ts）：普通 204/256、高级 44/256、超级 7/256、大师 1/256。
+//      蛋的名字是 Egg.prototype.getEggDescriptor()（扭蛋机结果页、背包里的蛋列表都用它）：
+//      被加成升过档的蛋，名字后面加个「+」，这样一眼能看出是哪几只。
+//   3. 常驻能力值：游戏算一只宝可梦的能力值只有一处 Pokemon.calculateStats()
+//      （src/field/pokemon.ts）：升级、进化、换算都会重算。加成加在重算之后，所以是「永久」的：
+//      宝可梦自己的数值变大，换宝可梦也照样有（每只自己的都吃到）。
+//   4. 局外数据：每个 mod 一份，存 localStorage（关掉游戏、换存档都还在）。
+//   5. 成长线面板：mod 用 api.metaPanel() 描述它的成长线，这里负责画出来、扣点、升级。
+//   6. 道具「训练家提升」：图标画在游戏左上角的道具栏里（和游戏自己的道具排在一起），
+//      指上去/点一下，右上角出现游戏自己的道具说明面板，里面写着现在各项加了多少。
+//
+// 用 window.CoopModsExt 注册，和别的 engine/ext-*.js 是同一套机制，由 tools/assemble.mjs 接在引擎核心后面。
+(function () {
+  if (!window.CoopModsExt) return; // 引擎还没起来（顺序不对）
+  window.CoopModsExt('h', function (X) {
+    const log = (...a) => X.log('ext', ...a);
+    const TIER_ZH = ['普通', '高级', '超级', '大师']; // EggTier: COMMON / RARE / EPIC / LEGENDARY
+    const GACHA_SOURCE = [0, 1, 2]; // EggSourceType: GACHA_MOVE / GACHA_LEGENDARY / GACHA_SHINY
+    const EGG_MARK = '+'; // 蛋名后面的标记：这只蛋是被加成升过档的（游戏那个像素字体里有这个字）
+
+    // ---- 事件 ----
+    X.addEvent('pokemonCaught'); // 获得一只宝可梦：{ speciesId, name, kind, first, rarity }
+                                // kind: 'catch' 野外捕捉 / 'egg' 孵蛋 / 'evolution' 进化
+    X.addEvent('gachaEggTier');  // 扭蛋机抽到的蛋：{ tier, sourceType, n }，返回更高的 tier（0..3）就是升级
+    X.addEvent('gachaEggBoosted'); // 蛋真的被升了一档：{ tier, newTier, sourceType, n, egg }
+    X.addEvent('gachaEggMark');    // 这只蛋要不要加标记：{ id, tier, boosted, egg }，返回 true 就加
+    X.addEvent('gachaPull');       // 扭蛋机要抽蛋了：{ count }（这一批几个蛋）
+    X.addEvent('pokemonStatBonus'); // 常驻能力值加成：{ pokemon, bonus }，往 bonus 里写比例（0.1 = +10%）
+    X.addEvent('itemInfo');    // 道具说明面板里写什么：返回一段文字（mod 自己最清楚它的成长线）
+
+    // ---- 局外数据：每个 mod 一份 ----
+    const metas = {};
+    const metaKey = id => 'prs-mod-meta-' + id;
+    function metaOf(id) {
+      if (metas[id]) return metas[id];
+      let raw = null;
+      try { raw = JSON.parse(localStorage.getItem(metaKey(id)) || 'null'); } catch {}
+      const m = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      if (typeof m.points !== 'number' || !isFinite(m.points)) m.points = 0;
+      if (!m.lines || typeof m.lines !== 'object') m.lines = {};
+      if (!m.caught || typeof m.caught !== 'object') m.caught = {};
+      m.v = 1;
+      return (metas[id] = m);
+    }
+    function saveMeta(id) {
+      try { localStorage.setItem(metaKey(id), JSON.stringify(metaOf(id))); } catch {}
+    }
+
+    // ---- 成长线面板 ----
+    const panels = {};
+    function costOf(line, lv) { return Math.max(0, Math.floor(typeof line.cost === 'function' ? line.cost(lv) : line.cost)); }
+    X.onPanel((id, render) => {
+      const def = panels[id];
+      if (!def) return null;
+      const m = metaOf(id);
+      const on = X.isOn(id);
+      const lines = def.lines || [];
+      // 成长线有十来条，全展开面板很长：默认只留顶上这几行，点一下「展开」才铺开。
+      // 展开状态记在局外数据里（m.open），下次打开面板还是原来那样。
+      const expanded = !!m.open;
+      const rows = [];
+      // 顶上一行：成长点 + 展开/收起
+      rows.push(X.el('div', { class: 'set' }, [
+        X.el('div', { text: (def.title || '成长点') + '：' + Math.floor(m.points) + ' 点' }),
+        X.el('div', { class: 'opts' }, [X.el('button', {
+          text: expanded ? '收起成长线 ▲' : '展开成长线 ▼（' + lines.length + ' 条）',
+          onclick: () => {
+            m.open = !expanded;
+            saveMeta(id);
+            render();
+          },
+        })]),
+      ]));
+      if (!on) rows.push(X.el('div', { class: 'meta', text: '（打开这个 mod 才能用）' }));
+      // 现在这些成长线加在一起是什么效果（mod 自己给一行汇总）
+      if (def.summary) {
+        const s = String(X.guard('metaPanel summary', () => def.summary(), '') || '');
+        if (s) rows.push(X.el('div', { class: 'meta', text: '当前效果：' + s }));
+      }
+      // 刚点了升级：告诉玩家升到了几级（面板会重画，这一行留在最上面）
+      if (def.lastMsg) rows.push(X.el('div', { class: 'meta', text: def.lastMsg }));
+      // mod 自己想多写一行（比如「已捕捉多少种」）：note() 返回空字符串就不画
+      if (def.note) {
+        const nt = String(X.guard('metaPanel note', () => def.note(), '') || '');
+        if (nt) rows.push(X.el('div', { class: 'meta', text: nt }));
+      }
+      // 收起来的时候下面什么都不画
+      for (const line of expanded ? lines : []) {
+        const lv = Math.max(0, Math.min(line.max || 99, Math.floor(Number(m.lines[line.id]) || 0)));
+        const cost = costOf(line, lv);
+        const full = lv >= (line.max || 99);
+        const can = !full && m.points >= cost;
+        const btn = X.el('button', {
+          class: can ? '' : 'off',
+          text: full ? '已满级' : '升级（' + cost + ' 点）',
+          onclick: () => {
+            if (full || m.points < cost) return;
+            m.points -= cost;
+            m.lines[line.id] = lv + 1;
+            saveMeta(id);
+            def.lastMsg = '刚升级：' + line.name + ' → Lv' + (lv + 1) + '/' + (line.max || 99);
+            log('成长线 ' + line.id + ' → Lv' + (lv + 1));
+            if (def.onChange) X.guard('metaPanel onChange', () => def.onChange(line.id, lv + 1, 'up'));
+            render();
+          },
+        });
+        if (!can) btn.setAttribute('disabled', 'disabled');
+        const opts = [btn];
+        // 退款：退一级，把当初升这一级花的点数原样还回来（等级降了，效果也就跟着降）
+        if (lv > 0) {
+          const back = costOf(line, lv - 1); // 从 lv-1 升到 lv 当时花的点数
+          opts.push(X.el('button', {
+            class: 'off',
+            text: '退款（+' + back + ' 点）',
+            onclick: () => {
+              if (lv <= 0) return;
+              m.points += back;
+              m.lines[line.id] = lv - 1;
+              saveMeta(id);
+              def.lastMsg = '已退款：' + line.name + ' → Lv' + (lv - 1) + '/' + (line.max || 99);
+              log('成长线 ' + line.id + ' 退了一级 → Lv' + (lv - 1));
+              if (def.onChange) X.guard('metaPanel onChange', () => def.onChange(line.id, lv - 1, 'down'));
+              render();
+            },
+          }));
+        }
+        rows.push(X.el('div', { class: 'set' }, [
+          X.el('div', { text: line.name + '  Lv' + lv + '/' + (line.max || 99) }),
+          X.el('div', { class: 'meta', text: typeof line.desc === 'function' ? String(line.desc(lv)) : String(line.desc || '') }),
+          X.el('div', { class: 'opts' }, opts),
+        ]));
+      }
+      return X.el('div', {}, rows);
+    });
+
+    X.extendApi(mod => ({
+      // 局外数据（live 对象）：改了之后调 api.metaSave() 存起来
+      meta: () => metaOf(mod.id),
+      metaSave: () => saveMeta(mod.id),
+      // 图鉴里一共有多少种：游戏自己的数据（GameData.dexData 每个物种一条），拿不到就 0
+      dexTotal: () => {
+        try {
+          const gd = X.scene() && X.scene().gameData;
+          if (gd && gd.dexData) {
+            const n = Object.keys(gd.dexData).length;
+            if (n > 0) return n;
+          }
+        } catch {}
+        return 0;
+      },
+      // 图鉴进度：游戏自己记的「抓到过多少种 / 图鉴一共多少种」。
+      // mod 用它算「图鉴越全，抓到的新宝可梦越值钱」的倍率。
+      dexProgress: () => {
+        let caught = 0, total = 0;
+        try {
+          const gd = X.scene() && X.scene().gameData;
+          if (gd) {
+            if (gd.dexData) total = Object.keys(gd.dexData).length;
+            if (typeof gd.getSpeciesCount === 'function') {
+              // 游戏统计页数「抓到多少种」用的就是这个（src/system/game-data.ts）
+              caught = gd.getSpeciesCount(d => !!(d && d.caughtAttr)) || 0;
+            } else if (gd.dexData) {
+              caught = Object.keys(gd.dexData).filter(k => gd.dexData[k] && gd.dexData[k].caughtAttr).length;
+            }
+          }
+        } catch {}
+        const progress = total > 0 ? Math.max(0, Math.min(1, caught / total)) : 0;
+        return { caught, total, progress };
+      },
+      // 和引擎一样的种子随机数（同样的字符串总是同样的数）：mod 用来掷骰子
+      rng: X.rng,
+      // 成长线面板：def = { title, summary(), note(), lines: [{ id, name, max, cost, desc(lv) }], onChange(id, lv, kind) }
+      // kind 是 'up'（升级了）或 'down'（退款了）
+      metaPanel(def) {
+        if (panels[mod.id]) throw new Error('metaPanel: one per mod');
+        if (!def || !Array.isArray(def.lines)) throw new Error('metaPanel needs lines');
+        panels[mod.id] = def;
+      },
+    }));
+
+    // ---- 捕捉到宝可梦 ----
+    function rarityOf(gd, pokemon) {
+      const species = pokemon && pokemon.species;
+      if (!species) return null;
+      const speciesId = species.speciesId;
+      let first = true;
+      try { const entry = gd && gd.dexData ? gd.dexData[speciesId] : null; first = !(entry && entry.caughtAttr); } catch {}
+      let starterCost = 0; // 初始宝可梦在游戏里值几个点（1..10）：越贵越稀有
+      try {
+        // 第二个参数传 0：只看这只宝可梦「本来」值几个点，不算玩家用糖果降过的那部分，
+        // 否则越常用的初始宝可梦反而点越少。
+        if (gd && gd.starterData && gd.starterData[speciesId] && typeof gd.getSpeciesStarterValue === 'function') {
+          const v = gd.getSpeciesStarterValue(speciesId, 0);
+          if (Number.isFinite(v) && v > 0) starterCost = v;
+        }
+      } catch {}
+      let baseTotal = 0;
+      try { baseTotal = species.baseTotal || (species.getTotalStat ? species.getTotalStat() : 0) || 0; } catch {}
+      return {
+        speciesId, name: species.name || '', first,
+        rarity: {
+          mythical: !!species.mythical, legendary: !!species.legendary, subLegendary: !!species.subLegendary,
+          baseTotal, starterCost,
+        },
+      };
+    }
+    function hookGameData(s) {
+      const gd = s && s.gameData;
+      if (!gd) return;
+      const proto = Object.getPrototypeOf(gd);
+      if (!proto || typeof proto.setPokemonCaught !== 'function') return;
+      X.wrap(proto, 'setPokemonCaught', 'tg', orig => function (...args) {
+        try {
+          const pokemon = args[0], incrementCount = args[1], fromEgg = args[2];
+          // 游戏自己的规矩（src/system/game-data.ts 的 setPokemonCaught）：
+          //   incrementCount=true  是真的「获得」：野外捕捉、孵蛋、神秘遭遇，游戏都会记图鉴；
+          //   incrementCount=false 是形态变化/进化，游戏只有在「根形态已经捕捉过」时才记图鉴，
+          //                       否则那只是租借/借用来的，图鉴不动。
+          // 所以这里照抄游戏的判断：算不算一次「获得」，和游戏自己记不记图鉴是一致的。
+          let kind = null;
+          if (incrementCount !== false) kind = fromEgg ? 'egg' : 'catch';
+          else {
+            let rootCaught = false;
+            try {
+              const rootId = pokemon.species.getRootSpeciesId();
+              const entry = this.dexData && this.dexData[rootId];
+              rootCaught = !!(entry && entry.caughtAttr);
+            } catch {}
+            if (rootCaught) kind = 'evolution'; // 进化出新形态
+          }
+          if (kind) {
+            const info = rarityOf(this, pokemon);
+            if (info) {
+              info.kind = kind;
+              for (const [m, fn] of X.listeners('pokemonCaught')) X.guard('pokemonCaught (' + (m && m.id) + ')', () => fn(info));
+            }
+          }
+        } catch (e) { log('捕捉钩子出错：' + String((e && e.stack) || e).slice(0, 200)); }
+        return orig.apply(this, args);
+      });
+    }
+
+    // ---- 扭蛋机的蛋 ----
+    const pulls = { n: 0 };
+    let eggProto = null;
+    function installEgg(proto) {
+      if (!proto || eggProto === proto) return;
+      eggProto = proto;
+      X.wrap(proto, 'rollEggTier', 'tg', orig => function (...args) {
+        const tier = orig.apply(this, args);
+        try {
+          if (!GACHA_SOURCE.includes(this._sourceType)) return tier; // 只有扭蛋机抽的蛋才算
+          const ev = { tier, sourceType: this._sourceType, n: ++pulls.n };
+          let best = tier;
+          for (const [m, fn] of X.listeners('gachaEggTier')) {
+            const r = X.guard('gachaEggTier (' + (m && m.id) + ')', () => fn(ev));
+            if (Number.isFinite(r) && r > best) best = Math.min(3, Math.floor(r));
+          }
+          if (best !== tier) {
+            // 记在这只蛋身上：等它的名字被画出来的时候，后面加个「+」
+            this.__tgBoosted = { from: tier, to: best };
+            log('蛋升了一档：' + TIER_ZH[tier] + ' -> ' + TIER_ZH[best]);
+            const bev = { tier, newTier: best, sourceType: this._sourceType, n: ev.n, egg: this };
+            for (const [m, fn] of X.listeners('gachaEggBoosted')) {
+              X.guard('gachaEggBoosted (' + (m && m.id) + ')', () => fn(bev));
+            }
+          }
+          return best;
+        } catch (e) { log('扭蛋机钩子出错：' + String((e && e.stack) || e).slice(0, 200)); }
+        return tier;
+      });
+      // 蛋的名字：扭蛋机结果页和背包里的蛋列表都是用它画的。
+      // 被加成升过档的，后面加个「+」；问一遍开着 mod，它说自己认得这只蛋就标上
+      // （mod 把自己升过档的蛋的编号记下来了，所以重开游戏以后还标得出来）。
+      X.wrap(proto, 'getEggDescriptor', 'tg', orig => function (...args) {
+        const s = orig.apply(this, args);
+        try {
+          const ev = { id: this._id, tier: this._tier, boosted: !!this.__tgBoosted, egg: this };
+          let marked = ev.boosted;
+          for (const [m, fn] of X.listeners('gachaEggMark')) {
+            const r = X.guard('gachaEggMark (' + (m && m.id) + ')', () => fn(ev));
+            if (r === true) marked = true;
+          }
+          return marked ? s + EGG_MARK : s;
+        } catch (e) { log('蛋的标记出错：' + String((e && e.stack) || e).slice(0, 200)); }
+        return s;
+      });
+    }
+    function findEgg(s) {
+      const gd = s && s.gameData;
+      const eggs = gd && gd.eggs;
+      if (eggs && eggs.length) installEgg(Object.getPrototypeOf(eggs[0])); // 玩家已经有蛋了
+      // 扭蛋机：包住 pullEggs。抽之前先告诉 mod「这一批要抽几个」，
+      // 抽完第一批就知道游戏里「蛋」这个类了（那一批还是原来的稀有度）。
+      const handlers = (s.ui && s.ui.handlers) || [];
+      const h = handlers.find(x => x && x.constructor && x.constructor.name === 'EggGachaUiHandler');
+      if (!h || h.__tgEggHooked) return;
+      h.__tgEggHooked = true;
+      const orig = h.pullEggs;
+      if (typeof orig !== 'function') return;
+      h.pullEggs = function (...args) {
+        try {
+          const ev = { count: Number(args[0]) || 0 };
+          for (const [m, fn] of X.listeners('gachaPull')) {
+            X.guard('gachaPull (' + (m && m.id) + ')', () => fn(ev));
+          }
+        } catch {}
+        const eggs = orig.apply(this, args);
+        try { if (eggs && eggs[0]) installEgg(Object.getPrototypeOf(eggs[0])); } catch {}
+        return eggs;
+      };
+    }
+
+    // ---- 常驻能力值加成 ----
+    // 游戏的 Pokemon.calculateStats() 按「等级 + 个体值 + 性格 + 道具」重算一只宝可梦的能力值，
+    // 结果存在 pokemon.stats 里（存档也存这份）。加成加在重算之后：数值直接变大，永久有效。
+    const STAT_NUM = { hp: 0, atk: 1, def: 2, spatk: 3, spdef: 4, spd: 5 };
+    const applied = new WeakMap(); // 宝可梦 -> 已经算进去的加成（用来发现「该重算了」）
+    const sigOf = bonus => Object.keys(bonus).sort().map(k => k + ':' + (Number(bonus[k]) || 0)).join(',');
+
+    // 现在该加多少：问一遍在跑的 mod（没开的 mod 不在 listeners 里）
+    function bonusOf(pokemon) {
+      const bonus = {};
+      const ev = { pokemon, bonus };
+      for (const [m, fn] of X.listeners('pokemonStatBonus')) {
+        X.guard('pokemonStatBonus (' + (m && m.id) + ')', () => fn(ev));
+      }
+      return bonus;
+    }
+    // 把加成加到这只宝可梦身上（只有玩家自己的宝可梦；HP 不动）
+    function applyBonus(pokemon) {
+      if (!pokemon || typeof pokemon.isPlayer !== 'function' || !pokemon.isPlayer()) return;
+      const bonus = bonusOf(pokemon);
+      applied.set(pokemon, sigOf(bonus));
+      for (const key of Object.keys(bonus)) {
+        const num = STAT_NUM[key];
+        if (!num) continue; // HP（0）不加
+        const pct = Number(bonus[key]);
+        if (!isFinite(pct) || !pct) continue;
+        const cur = typeof pokemon.getStat === 'function' ? pokemon.getStat(num) : (pokemon.stats || [])[num];
+        if (!(cur > 0)) continue;
+        const next = Math.max(1, Math.round(cur * (1 + pct)));
+        if (typeof pokemon.setStat === 'function') pokemon.setStat(num, next);
+        else if (pokemon.stats) pokemon.stats[num] = next;
+      }
+    }
+    X.pokemonClass(proto => {
+      X.wrap(proto, 'calculateStats', 'tg', orig => function (...args) {
+        const r = orig.apply(this, args);
+        try { applyBonus(this); } catch (e) { log('能力值加成出错：' + String((e && e.stack) || e).slice(0, 200)); }
+        return r;
+      });
+    });
+    // 队伍里有宝可梦是引擎找到 Pokemon 这个类之前就有的（开局选初始宝可梦那会儿），或者刚点了升级：
+    // 这两种时候能力值都还没算上加成，重算一遍就补上了。
+    function refreshParty() {
+      let party = [];
+      try { party = X.battle.party(); } catch { return; }
+      for (const p of party) {
+        if (!p || typeof p.isPlayer !== 'function' || !p.isPlayer()) continue;
+        if (typeof p.calculateStats !== 'function') continue;
+        let want = '';
+        try { want = sigOf(bonusOf(p)); } catch { continue; }
+        if ((applied.get(p) || '') === want) continue; // 已经是对的
+        try { p.calculateStats(); applied.set(p, want); } catch (e) { log('重算能力值出错：' + String((e && e.stack) || e).slice(0, 200)); }
+      }
+    }
+
+    // ---- 道具「训练家提升」 ----
+    // 图标画在游戏左上角的道具栏里（就是游戏自己那排道具图标 modifier-bar 的后面），
+    // 画法、位置、点开的样子都和游戏自己的道具一样：指上去/点一下，右上角出现说明面板。
+    const ITEM_KEY = 'trainer-growth:boost';
+    const itemView = { scene: null, icon: null, sprite: null, tip: false };
+
+    // 道具说明面板里写什么：问一遍在跑的 mod（mod 自己最清楚每条成长线是什么）
+    function itemText() {
+      for (const [m, fn] of X.listeners('itemInfo')) {
+        const r = X.guard('itemInfo (' + (m && m.id) + ')', () => fn(), '');
+        if (typeof r === 'string' && r) return r;
+      }
+      return '';
+    }
+
+    // 说明面板：完全用游戏自己那一套（同样的位置规则、同样的显示/隐藏），
+    // 别的道具指上去是什么样，这个就是什么样。
+    function showItemInfo(s) {
+      const ui = s.ui;
+      if (!ui || typeof ui.showTooltip !== 'function') return;
+      const it = X.items[ITEM_KEY];
+      const text = itemText();
+      itemView.tip = true;
+      try { ui.showTooltip(it ? it.name : '训练家提升', text || '（还没有内容）'); } catch (e) { log('说明面板打不开：' + String((e && e.stack) || e).slice(0, 120)); }
+    }
+    function hideItemInfo(s) {
+      itemView.tip = false;
+      try { if (s.ui && typeof s.ui.hideTooltip === 'function') s.ui.hideTooltip(); } catch {}
+    }
+    // 鼠标还指着这个图标吗（图标被游戏重建以后，指针不会自己再触发一次 pointerover）
+    function pointerOn(s, icon) {
+      try {
+        const p = s.input && s.input.activePointer;
+        if (!p || typeof s.input.hitTestPointer !== 'function') return false;
+        return s.input.hitTestPointer(p, icon).length > 0;
+      } catch { return false; }
+    }
+
+    function drawItem(s) {
+      if (!s || !s.add || !window.Phaser) return;
+      const it = X.items[ITEM_KEY];
+      const bar = typeof s.getModifierBar === 'function' ? s.getModifierBar() : null;
+      let party = [];
+      try { party = (s.getPlayerParty && s.getPlayerParty()) || []; } catch { party = []; }
+      // 只有这一局真的在跑、mod 也开着的时候才画
+      const on = !!it && X.isOn('trainer-growth') && X.active() && party.length > 0;
+      if (!bar || !on) {
+        if (itemView.icon) { try { itemView.icon.destroy(); } catch {} }
+        itemView.icon = null;
+        itemView.sprite = null;
+        hideItemInfo(s); // 面板别留在屏幕上
+        return;
+      }
+      // 游戏每次刷新道具栏都会把里面的图标全清掉重建，我们的也得跟着重建
+      const rebuilt = !itemView.icon || !itemView.icon.scene || bar.list.indexOf(itemView.icon) < 0;
+      const wasTip = itemView.tip; // 销毁图标不会触发 pointerout，面板得自己收拾
+      if (rebuilt) {
+        const c = new Phaser.GameObjects.Container(s, 0, 0);
+        const sp = new Phaser.GameObjects.Sprite(s, 0, 12, 'items', X.frameOf(ITEM_KEY));
+        sp.setOrigin(0, 0.5);
+        sp.setScale(0.7); // 游戏自己的道具图标大多 22x22，我们的格子是 32x32，缩一点才一样大
+        c.add(sp);
+        c.setInteractive(new Phaser.Geom.Rectangle(0, 0, 32, 24), Phaser.Geom.Rectangle.Contains);
+        c.on('pointerover', () => showItemInfo(s));
+        c.on('pointerout', () => hideItemInfo(s));
+        bar.add(c);
+        itemView.icon = c;
+        itemView.sprite = sp;
+        itemView.scene = s;
+      }
+      // 图标是后来才进到游戏的道具贴图里的：贴图好了就把帧换上去
+      try {
+        const frame = X.frameOf(ITEM_KEY);
+        if (itemView.sprite && itemView.sprite.frame.name !== frame) itemView.sprite.setFrame(frame);
+      } catch {}
+      // 位置：跟在游戏自己的道具后面（游戏自己的排法：每行 12 个，间隔 26 像素）
+      const idx = bar.list.indexOf(itemView.icon);
+      const count = bar.list.length;
+      const rowIcons = 12 + 6 * Math.max(Math.ceil(Math.min(count, 24) / 12) - 2, 0);
+      itemView.icon.setPosition((idx % rowIcons) * 26 / (rowIcons / 12), Math.floor(idx / rowIcons) * 20);
+      itemView.icon.setVisible(true);
+      // 刚重建过：说明面板得自己收拾一下（图标被销毁时不会触发 pointerout）
+      if (rebuilt && wasTip) {
+        if (pointerOn(s, itemView.icon)) showItemInfo(s); // 鼠标还指着它：面板留着
+        else hideItemInfo(s); // 已经不在上面了：面板关掉
+      }
+      // 道具一直在队伍背包里：这样它就是一个真的道具（面板里能看到，也就不会被当成随机奖励发出去）
+      try { if (X.count(null, ITEM_KEY) < 1) X.give(null, ITEM_KEY, {}, 'mod'); } catch {}
+    }
+    X.debug('tgItemInfo', () => itemText()); // 给测试用：说明面板里现在写着什么
+
+    X.onTick(s => {
+      try { hookGameData(s); findEgg(s); refreshParty(); drawItem(s); } catch (e) { log('扩展出错：' + String((e && e.stack) || e).slice(0, 200)); }
+    });
+    // 开关变了（工坊这边加的）：单人模式里把最后一个 mod 关掉以后引擎就不再每拍跑了，
+    // 所以关的那一下要自己收拾一次：能力值重算回原样，道具栏里的图标拿掉。
+    X.onSwitch(() => {
+      const s = X.scene();
+      if (!s) return;
+      try { refreshParty(); drawItem(s); } catch (e) { log('开关收尾出错：' + String((e && e.stack) || e).slice(0, 200)); }
+    });
+  });
+})();
