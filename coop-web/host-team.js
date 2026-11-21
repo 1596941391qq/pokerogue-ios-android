@@ -93,9 +93,12 @@ window.CoopTeam = (function () {
   function askerFor(slot, forced) {
     const p = party()[slot], who = ownerOf(p);
     if (!who) return null;
-    if (forced) { // a slot to refill: the teammate takes it when they have nobody on the field and can send one
-      const x = other(who);
-      if (!party().some(q => owners[q.id] === x && q.isOnField() && !q.isFainted()) && canSendOut(x)) return x;
+    if (forced) { // a slot to refill: the teammate takes it when they have nobody on the field and can send one ...
+      const x = other(who), fights = w => party().some(q => owners[q.id] === w && q.isOnField() && !q.isFainted());
+      // ... but only from an owner who still fights in the other slot, or who has nobody to send. When both
+      // players' Pokémon go down in one turn each refills their own slot (before 11-21 the first question went
+      // to the teammate, and the two ended up on each other's side of the field).
+      if (!fights(x) && canSendOut(x) && (fights(who) || !canSendOut(who))) return x;
     }
     return !forced || canSendOut(who) || !canSendOut(other(who)) ? who : other(who);
   }
