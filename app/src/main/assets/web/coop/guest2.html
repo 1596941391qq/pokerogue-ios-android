@@ -207,6 +207,10 @@
   @media (orientation: landscape) and (max-height: 600px) {
     #team { left: 22%; right: 22%; top: 8px; bottom: 8px; max-height: none; }
   }
+  /* 11-21: 全屏 button for computers only (phones already fill the screen in landscape) */
+  .fsBtn { padding: 2px 8px; border-radius: 999px; font-size: 12px; line-height: 1.3; }
+  .fsBtn[hidden] { display: none; }
+  @media (pointer: coarse), (orientation: landscape) and (max-height: 600px) { .fsBtn { display: none; } }
 
   #join { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 20px; text-align: center; background: var(--bg); z-index: 5; }
   #join h1 { margin: 0; font-size: 22px; }
@@ -230,6 +234,7 @@
     <span class="room">房间 <b id="roomName">----</b></span>
     <span class="conn" id="conn"><span class="dot"></span><span id="connTxt">连接中</span></span>
     <button class="sndBtn" id="snd" aria-label="声音">🔇</button>
+    <button class="fsBtn" id="fsBtn" title="全屏（双击画面也行，Esc 退出）">全屏</button>
     <button class="teamBtn" id="teamBtn">队伍</button>
   </div>
   <div class="screen" id="screen"><video id="v" playsinline autoplay muted></video><div class="wait" id="wait">等房主的画面…</div></div>
@@ -429,6 +434,16 @@
   $('snd').onclick = () => { wantSound = $('v').muted || !wantSound; store.set('coopSound', wantSound ? '1' : '0'); applySound(); };
   addEventListener('pointerdown', e => { if (wantSound && $('v').muted && e.target !== $('snd')) applySound(); }, true);
   showSound();
+  // 11-21 B站评论「pc端浏览器这个界面能改成全屏吗」: 全屏 button (computers), double-click on the picture does the same
+  const fsOk = !!(document.fullscreenEnabled && document.documentElement.requestFullscreen);
+  function toggleFs() {
+    if (!fsOk) return;
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen().catch(() => {});
+  }
+  if (!fsOk) $('fsBtn').hidden = true;
+  $('fsBtn').onclick = () => { toggleFs(); $('fsBtn').blur(); }; // blur: Space/Enter are game keys and must not re-toggle it
+  $('v').addEventListener('dblclick', toggleFs);
+  document.addEventListener('fullscreenchange', () => { $('fsBtn').textContent = document.fullscreenElement ? '退出全屏' : '全屏'; });
 
   $('fold').onclick = () => { const f = $('pick').classList.toggle('folded'); $('fold').textContent = f ? '展开' : '收起'; };
 
